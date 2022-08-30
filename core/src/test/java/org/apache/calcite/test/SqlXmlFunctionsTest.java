@@ -36,6 +36,18 @@ import static org.junit.jupiter.api.Assertions.fail;
  */
 class SqlXmlFunctionsTest {
 
+  private static final String XML = "<document>string</document>";
+  private static final String FILE = System.getProperty("os.name").startsWith("Windows")
+      ? "file:///C:/Windows/System32/drivers/etc/hosts"
+      : "file:///etc/hosts";
+  private static final String XML_EXTERNAL_ENTITY =
+      "<!DOCTYPE document [ <!ENTITY entity SYSTEM \"" + FILE + "\"> ]><document>&entity;</document>";
+  private static final String XSLT =
+      "<xsl:stylesheet xmlns:xsl=\"http://www.w3.org/1999/XSL/Transform\"></xsl:stylesheet>";
+  private static final String XSLT_EXTERNAL_ENTITY =
+      "<!DOCTYPE document [ <!ENTITY entity SYSTEM \"" + FILE + "\"> ]><xsl:stylesheet xmlns:xsl=\"http://www.w3.org/1999/XSL/Transform\">&entity;</xsl:stylesheet>";
+  private static final String DOCUMENT_PATH = "/document";
+
   @Test void testExtractValue() {
     assertExtractValue("<a>ccc<b>ddd</b></a>", "/a", is("ccc"));
 
@@ -45,6 +57,33 @@ class SqlXmlFunctionsTest {
     assertExtractValueFailed(input, "#", Matchers.expectThrowable(expected));
   }
 
+  @Test void testExtractValueExternalEntity() {
+    String message = "Invalid input for EXTRACTVALUE: xml: '"
+        + XML_EXTERNAL_ENTITY + "', xpath expression: '" + DOCUMENT_PATH + "'";
+    CalciteException expected = new CalciteException(message, null);
+    assertExtractValueFailed(XML_EXTERNAL_ENTITY, DOCUMENT_PATH,
+        Matchers.expectThrowable(expected));
+  }
+
+  @Test void testExistsNodeExternalEntity() {
+    String message = "Invalid input for EXISTSNODE xpath: '"
+        + DOCUMENT_PATH + "', namespace: '" + null + "'";
+    CalciteException expected = new CalciteException(message, null);
+    assertExistsNodeFailed(XML_EXTERNAL_ENTITY, DOCUMENT_PATH, null,
+        Matchers.expectThrowable(expected));
+  }
+
+  @Test void testXmlTransformExternalEntity() {
+    String message = "Invalid input for XMLTRANSFORM xml: '" + XML_EXTERNAL_ENTITY + "'";
+    CalciteException expected = new CalciteException(message, null);
+    assertXmlTransformFailed(XML_EXTERNAL_ENTITY, XSLT, Matchers.expectThrowable(expected));
+  }
+
+  @Test void testXmlTransformExternalEntityXslt() {
+    String message = "Illegal xslt specified : '" + XSLT_EXTERNAL_ENTITY + "'";
+    CalciteException expected = new CalciteException(message, null);
+    assertXmlTransformFailed(XML, XSLT_EXTERNAL_ENTITY, Matchers.expectThrowable(expected));
+  }
 
   @Test void testXmlTransform() {
     assertXmlTransform(null, "", nullValue());
