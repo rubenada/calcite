@@ -1792,7 +1792,104 @@ public class SqlToRelConverterTest extends SqlToRelTestBase {
     sql(sql).trim(true).ok();
   }
 
-  @Test public void testOffset0() {
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-5377">[CALCITE-5377]
+   * RelFieldTrimmer support Sort with dynamic param</a>. */
+  @Test void testDynamicParameterSortWithTrim() {
+    final String sql = "select ename from "
+        + "(select * from emp order by sal limit ? offset ?) a";
+    sql(sql).withTrim(true).ok();
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-3183">[CALCITE-3183]
+   * Trimming method for Filter rel uses wrong traitSet</a>. */
+  @SuppressWarnings("rawtypes")
+  @Test void testFilterAndSortWithTrim() {
+    // Run query and save plan after trimming
+    final String sql = "select count(a.EMPNO)\n"
+        + "from (select * from emp order by sal limit 3) a\n"
+        + "where a.EMPNO > 10 group by 2";
+    RelNode afterTrim = sql(sql)
+        .withDecorrelate(false)
+        .withFactory(t ->
+            // Create a customized test with RelCollation trait in the test
+            // cluster.
+            t.withPlannerFactory(context ->
+                new MockRelOptPlanner(Contexts.empty()) {
+                  @Override public List<RelTraitDef> getRelTraitDefs() {
+                    return ImmutableList.of(RelCollationTraitDef.INSTANCE);
+                  }
+                  @Override public RelTraitSet emptyTraitSet() {
+                    return RelTraitSet.createEmpty().plus(
+                        RelCollationTraitDef.INSTANCE.getDefault());
+                  }
+                }))
+        .toRel();
+
+    // Get Sort and Filter operators
+    final List<RelNode> rels = new ArrayList<>();
+    final RelShuttleImpl visitor = new RelShuttleImpl() {
+      @Override public RelNode visit(LogicalSort sort) {
+        rels.add(sort);
+        return super.visit(sort);
+      }
+      @Override public RelNode visit(LogicalFilter filter) {
+        rels.add(filter);
+        return super.visit(filter);
+      }
+    };
+    visitor.visit(afterTrim);
+
+    // Ensure sort and filter operators have consistent traitSet after trimming
+    assertThat(rels.size(), is(2));
+    RelTrait filterCollation = rels.get(0).getTraitSet()
+        .getTrait(RelCollationTraitDef.INSTANCE);
+    RelTrait sortCollation = rels.get(1).getTraitSet()
+        .getTrait(RelCollationTraitDef.INSTANCE);
+    assertThat(filterCollation, notNullValue());
+    assertThat(sortCollation, notNullValue());
+    assertThat(filterCollation.satisfies(sortCollation), is(true));
+  }
+
+  @Test void testRelShuttleForLogicalCalc() {
+    final String sql = "select ename from emp";
+    final RelNode rel = sql(sql).toRel();
+    final HepProgramBuilder programBuilder = HepProgram.builder();
+    programBuilder.addRuleInstance(CoreRules.PROJECT_TO_CALC);
+    final HepPlanner planner = new HepPlanner(programBuilder.build());
+    planner.setRoot(rel);
+    final RelNode calc = planner.findBestExp();
+    final List<RelNode> rels = new ArrayList<>();
+    final RelShuttleImpl visitor = new RelShuttleImpl() {
+      @Override public RelNode visit(LogicalCalc calc) {
+        RelNode visitedRel = super.visit(calc);
+        rels.add(visitedRel);
+        return visitedRel;
+      }
+    };
+    calc.accept(visitor);
+    assertThat(rels.size(), is(1));
+    assertThat(rels.get(0), isA(LogicalCalc.class));
+  }
+
+  @Test void testRelShuttleForLogicalTableModify() {
+    final String sql = "insert into emp select * from emp";
+    final RelNode rel = sql(sql).toRel();
+    final List<RelNode> rels = new ArrayList<>();
+    final RelShuttleImpl visitor = new RelShuttleImpl() {
+      @Override public RelNode visit(LogicalTableModify modify) {
+        RelNode visitedRel = super.visit(modify);
+        rels.add(visitedRel);
+        return visitedRel;
+      }
+    };
+    rel.accept(visitor);
+    assertThat(rels.size(), is(1));
+    assertThat(rels.get(0), isA(LogicalTableModify.class));
+  }
+
+  @Test void testOffset0() {
     final String sql = "select * from emp offset 0";
     sql(sql).ok();
   }
