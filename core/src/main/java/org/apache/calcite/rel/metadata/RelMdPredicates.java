@@ -585,7 +585,8 @@ public class RelMdPredicates
       switch (joinType) {
       case INNER:
       case LEFT:
-        infer(leftChildPredicates, allExprDigests, inferredPredicates,
+      case ANTI:
+        infer(leftChildPredicates, allExprs, inferredPredicates,
             includeEqualityInference,
             joinType == JoinRelType.LEFT ? rightFieldsBitSet
                 : allFieldsBitSet);
@@ -641,6 +642,7 @@ public class RelMdPredicates
         return RelOptPredicateList.of(rexBuilder, pulledUpPredicates,
           leftInferredPredicates, rightInferredPredicates);
       case LEFT:
+      case ANTI:
         return RelOptPredicateList.of(rexBuilder,
             RelOptUtil.conjunctions(leftChildPredicates),
             leftInferredPredicates, rightInferredPredicates);
