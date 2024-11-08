@@ -21,6 +21,7 @@ import org.apache.calcite.rel.metadata.CachingRelMetadataProvider;
 import org.apache.calcite.rel.metadata.RelMetadataProvider;
 import org.apache.calcite.rel.metadata.RelMetadataQuery;
 import org.apache.calcite.rex.RexExecutor;
+import org.apache.calcite.sql2rel.RelDecorrelator;
 import org.apache.calcite.util.CancelFlag;
 import org.apache.calcite.util.trace.CalciteTrace;
 
@@ -333,6 +334,12 @@ public interface RelOptPlanner {
 
   /** Returns the executor used to evaluate constant expressions. */
   @Nullable RexExecutor getExecutor();
+
+  /** Sets the decorrelator. */
+  void setDecorrelator(@Nullable RelDecorrelator decorrelator);
+
+  /** Returns the decorrelator used to decorrelate expressions. */
+  @Nullable RelDecorrelator getDecorrelator();
 
   /** Called when a relational expression is copied to a similar expression. */
   void onCopy(RelNode rel, RelNode newRel);
