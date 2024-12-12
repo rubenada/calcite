@@ -249,10 +249,29 @@ public class RelMdColumnUniqueness
     // Divide up the input column mask into column masks for the left and
     // right sides of the join
     final Pair<ImmutableBitSet, ImmutableBitSet> leftAndRightColumns =
-        splitLeftAndRightColumns(rel.getLeft().getRowType().getFieldCount(),
-            columns);
-    final ImmutableBitSet leftColumns = leftAndRightColumns.left;
-    final ImmutableBitSet rightColumns = leftAndRightColumns.right;
+        splitLeftAndRightColumns(leftColumnCount, columns);
+    ImmutableBitSet leftColumns = leftAndRightColumns.left;
+    ImmutableBitSet rightColumns = leftAndRightColumns.right;
+
+    // for FULL OUTER JOIN if columns contain column from both inputs it is not
+    // guaranteed that the result will be unique
+    if (!ignoreNulls && rel.getJoinType() == JoinRelType.FULL
+        && leftColumns.cardinality() > 0 && rightColumns.cardinality() > 0) {
+      return false;
+    }
+
+    final JoinInfo joinInfo = rel.analyzeCondition();
+    if (rel.getJoinType() == JoinRelType.INNER) {
+      // Joining with a singleton constrains the keys on the other table
+      final Double rightMaxRowCount = mq.getMaxRowCount(right);
+      if (rightMaxRowCount != null && rightMaxRowCount <= 1.0) {
+        leftColumns = leftColumns.union(joinInfo.leftSet());
+      }
+      final Double leftMaxRowCount = mq.getMaxRowCount(left);
+      if (leftMaxRowCount != null && leftMaxRowCount <= 1.0) {
+        rightColumns = rightColumns.union(joinInfo.rightSet());
+      }
+    }
 
     // If the original column mask contains columns from both the left and
     // right hand side, then the columns are unique if and only if they're
