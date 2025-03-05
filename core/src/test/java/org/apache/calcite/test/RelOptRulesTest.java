@@ -235,8 +235,98 @@ public class RelOptRulesTest extends RelOptTestBase {
         + "    from emp\n"
         + "    group by empno, deptno))\n"
         + "or deptno < 40 + 60";
-    checkSubQuery(sql)
-        .with(hepProgram)
+    sql(sql)
+        .withSubQueryRules()
+        .withRelBuilderConfig(b -> b.withAggregateUnique(true))
+        .withRule(CoreRules.FILTER_REDUCE_EXPRESSIONS)
+        .check();
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-2865">[CALCITE-2865]
+   * FilterProjectTransposeRule generates wrong traitSet when
+   * copyFilter/copyProject is true</a>. */
+  @Test void testFilterProjectTransposeRule() {
+    List<RelOptRule> rules =
+        Arrays.asList(
+            // default: copyFilter=true, copyProject=true
+            CoreRules.FILTER_PROJECT_TRANSPOSE,
+            CoreRules.FILTER_PROJECT_TRANSPOSE.config
+                .withOperandFor(Filter.class,
+                    filter -> !RexUtil.containsCorrelation(filter.getCondition()),
+                    Project.class, project -> true)
+                .withCopyFilter(false)
+                .withCopyProject(false)
+                .toRule());
+
+    for (RelOptRule rule : rules) {
+      RelBuilder b = RelBuilder.create(RelBuilderTest.config().build());
+      RelNode in = b
+              .scan("EMP")
+              .sort(-4) // salary desc
+              .project(b.field(3)) // salary
+              .filter(b.equals(b.field(0), b.literal(11500))) // salary = 11500
+              .build();
+      HepProgram program = new HepProgramBuilder()
+              .addRuleInstance(rule)
+              .build();
+      HepPlanner hepPlanner = new HepPlanner(program);
+      hepPlanner.setRoot(in);
+      RelNode result = hepPlanner.findBestExp();
+
+      // Verify LogicalFilter traitSet (must be [3 DESC])
+      RelNode filter = result.getInput(0);
+      RelCollation collation =
+          filter.getTraitSet().getTrait(RelCollationTraitDef.INSTANCE);
+      assertNotNull(collation);
+      List<RelFieldCollation> fieldCollations = collation.getFieldCollations();
+      assertThat(fieldCollations, hasSize(1));
+      RelFieldCollation fieldCollation = fieldCollations.get(0);
+      assertThat(fieldCollation.getFieldIndex(), is(3));
+      assertThat(fieldCollation.getDirection(),
+          is(RelFieldCollation.Direction.DESCENDING));
+    }
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-6873">[CALCITE-6873]
+   * FilterProjectTransposeRule should not push the Filter past the Project
+   * when the Filter contains a Subquery with correlation</a>. */
+  @Test void testFilterProjectTransposeRule2() {
+    final String sql = "select * from (select deptno from emp) as d\n"
+        + "where NOT EXISTS (\n"
+        + "  select count(*) from emp e where e.deptno = d.deptno)";
+    sql(sql)
+        .withRule(CoreRules.FILTER_PROJECT_TRANSPOSE)
+        .checkUnchanged();
+  }
+
+  @Test void testFilterProjectTransposeRule3() {
+    final String sql = "select * from (select deptno from emp) as d\n"
+        + "where NOT EXISTS (\n"
+        + "  select count(*) from emp e)";
+    sql(sql)
+        .withRule(CoreRules.FILTER_PROJECT_TRANSPOSE)
+        .check();
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-6031">[CALCITE-6031]
+   * Add the planner rule that pushes the Filter past a Sample</a>. */
+  @Test void testFilterSampleTransposeWithBernoulli() {
+    final String sql = "select deptno from emp tablesample bernoulli(50) where deptno > 10";
+    sql(sql)
+        .withRule(CoreRules.FILTER_SAMPLE_TRANSPOSE)
+        .check();
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-6031">[CALCITE-6031]
+   * Add the planner rule that pushes the Filter past a Sample</a>. */
+  @Test void testFilterSampleTransposeWithSystem() {
+    final String sql = "select deptno from emp tablesample system(50) where deptno > 10";
+    sql(sql)
+        .withRule(CoreRules.FILTER_SAMPLE_TRANSPOSE)
         .check();
   }
 
