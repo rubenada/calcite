@@ -3415,7 +3415,96 @@ public class JdbcTest {
         .returnsUnordered("empid=150; name=Sebastian");
   }
 
-  @Test public void testExcept() {
+  /**
+   * Test case of
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-6836">[CALCITE-6836]
+   * Add Rule to convert INTERSECT to EXISTS</a>. */
+  @Test void testIntersectToExist() {
+    final String sql = ""
+            + "select \"empid\", \"name\" from \"hr\".\"emps\" where \"deptno\"=10\n"
+            + "intersect\n"
+            + "select \"empid\", \"name\" from \"hr\".\"emps\" where \"empid\">=150";
+    CalciteAssert.hr()
+        .query(sql)
+        .withHook(Hook.PLANNER, (Consumer<RelOptPlanner>)
+            p -> {
+              p.removeRule(CoreRules.INTERSECT_TO_DISTINCT);
+              p.removeRule(EnumerableRules.ENUMERABLE_INTERSECT_RULE);
+              p.removeRule(EnumerableRules.ENUMERABLE_FILTER_RULE);
+              p.addRule(CoreRules.INTERSECT_TO_EXISTS);
+              p.addRule(CoreRules.FILTER_SUB_QUERY_TO_CORRELATE);
+              p.addRule(CoreRules.FILTER_TO_CALC);
+            })
+        .explainContains("")
+        .returnsUnordered("empid=150; name=Sebastian");
+  }
+
+  /**
+   * Test case of
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-6893">[CALCITE-6893]
+   * Remove agg from Union children in IntersectToDistinctRule</a>. */
+  @Test void testIntersectToDistinct() {
+    final String sql = ""
+        + "select \"empid\", \"name\" from \"hr\".\"emps\" where \"deptno\"=10\n"
+        + "intersect\n"
+        + "select \"empid\", \"name\" from \"hr\".\"emps\" where \"empid\">=150";
+    final String[] returns = new String[] {
+        "empid=150; name=Sebastian"};
+
+    CalciteAssert.hr()
+        .query(sql)
+        .explainContains("EnumerableIntersect")
+        .returnsUnordered(returns);
+
+    CalciteAssert.hr()
+        .query(sql)
+        .withHook(Hook.PLANNER, (Consumer<RelOptPlanner>)
+            p -> {
+              p.removeRule(EnumerableRules.ENUMERABLE_INTERSECT_RULE);
+            })
+        .explainContains("EnumerableUnion(all=[true])")
+        .returnsUnordered(returns);
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-6904">[CALCITE-6904]
+   * IS_NOT_DISTINCT_FROM is converted error in EnumerableJoinRule</a>. */
+  @Test void testIsNotDistinctFrom() {
+    final String sql = ""
+        + "select \"t1\".\"commission\" from \"hr\".\"emps\" as \"t1\"\n"
+        + "join\n"
+        + "\"hr\".\"emps\" as \"t2\"\n"
+        + "on \"t1\".\"commission\" is not distinct from \"t2\".\"commission\"";
+    CalciteAssert.hr()
+        .query(sql)
+        .explainContains("NestedLoopJoin(condition=[IS NOT DISTINCT FROM($0, $1)]")
+        .returnsUnordered("commission=1000",
+            "commission=250",
+            "commission=500",
+            "commission=null");
+  }
+
+  /** Test case for <a href="https://issues.apache.org/jira/browse/CALCITE-6880">[CALCITE-6880]
+   * Implement IntersectToSemiJoinRule</a>. */
+  @Test void testIntersectToSemiJoin() {
+    final String sql = ""
+        + "select \"commission\" from \"hr\".\"emps\"\n"
+        + "intersect\n"
+        + "select \"commission\" from \"hr\".\"emps\" where \"empid\">=150";
+    CalciteAssert.hr()
+        .query(sql)
+        .withHook(Hook.PLANNER, (Consumer<RelOptPlanner>)
+            planner -> {
+              planner.removeRule(CoreRules.INTERSECT_TO_DISTINCT);
+              planner.removeRule(EnumerableRules.ENUMERABLE_INTERSECT_RULE);
+              planner.addRule(CoreRules.INTERSECT_TO_SEMI_JOIN);
+            })
+        .explainContains("")
+        .returnsUnordered("commission=500",
+            "commission=null");
+  }
+
+  @Test void testExcept() {
     final String sql = ""
         + "select \"empid\", \"name\" from \"hr\".\"emps\" where \"deptno\"=10\n"
         + "except\n"
