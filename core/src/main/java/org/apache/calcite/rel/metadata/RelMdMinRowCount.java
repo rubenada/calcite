@@ -82,16 +82,13 @@ public class RelMdMinRowCount
     if (rowCount == null) {
       rowCount = 0D;
     }
-    final int offset = rel.offset == null ? 0 : RexLiteral.intValue(rel.offset);
+
+    final long offset = rel.offset instanceof RexLiteral ? RexLiteral.longValue(rel.offset) : 0;
     rowCount = Math.max(rowCount - offset, 0D);
 
-    if (rel.fetch != null) {
-      final int limit = RexLiteral.intValue(rel.fetch);
-      if (limit < rowCount) {
-        return (double) limit;
-      }
-    }
-    return rowCount;
+    final double limit =
+        rel.fetch instanceof RexLiteral ? RexLiteral.longValue(rel.fetch) : rowCount;
+    return limit < rowCount ? limit : rowCount;
   }
 
   public Double getMinRowCount(EnumerableLimit rel, RelMetadataQuery mq) {
@@ -99,16 +96,13 @@ public class RelMdMinRowCount
     if (rowCount == null) {
       rowCount = 0D;
     }
-    final int offset = rel.offset == null ? 0 : RexLiteral.intValue(rel.offset);
+
+    final long offset = rel.offset instanceof RexLiteral ? RexLiteral.longValue(rel.offset) : 0;
     rowCount = Math.max(rowCount - offset, 0D);
 
-    if (rel.fetch != null) {
-      final int limit = RexLiteral.intValue(rel.fetch);
-      if (limit < rowCount) {
-        return (double) limit;
-      }
-    }
-    return rowCount;
+    final double limit =
+        rel.fetch instanceof RexLiteral ? RexLiteral.longValue(rel.fetch) : rowCount;
+    return limit < rowCount ? limit : rowCount;
   }
 
   public Double getMinRowCount(Aggregate rel, RelMetadataQuery mq) {
@@ -143,8 +137,8 @@ public class RelMdMinRowCount
     for (RelNode node : rel.getRels()) {
       if (node instanceof Sort) {
         Sort sort = (Sort) node;
-        if (sort.fetch != null) {
-          return (double) RexLiteral.intValue(sort.fetch);
+        if (sort.fetch instanceof RexLiteral) {
+          return (double) RexLiteral.longValue(sort.fetch);
         }
       }
     }

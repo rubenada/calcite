@@ -652,7 +652,26 @@ public class RelMetadataTest extends SqlToRelTestBase {
     checkRowCount(sql, 7d, 0D, 7d);
   }
 
-  @Test public void testRowCountAggregate() {
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-7154">[CALCITE-7154]
+   * When the offset or limit of a SORT operation is of type BIGINT row count
+   * calculation overflows</a>. */
+  @Test void testRowCountSortLimitOffsetOnFiniteBigint() {
+    final String sql = "select * from emp limit 3000000000 offset 2500000000";
+    sql(sql).assertThatRowCount(is(1d), is(0d), is(3000000000d));
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-5944">[CALCITE-5944]
+   * Add metadata for Sample</a>. */
+  @Test void testRowCountSample() {
+    sql("select * from emp tablesample bernoulli(50) repeatable(1)")
+        .assertThatRowCount(is(EMP_SIZE * 0.5), is(0D), is(Double.POSITIVE_INFINITY));
+    sql("select * from emp tablesample system(20)")
+        .assertThatRowCount(is(EMP_SIZE * 0.2), is(0D), is(Double.POSITIVE_INFINITY));
+  }
+
+  @Test void testRowCountAggregate() {
     final String sql = "select deptno from emp group by deptno";
     checkRowCount(sql, 1.4D, 0D, Double.POSITIVE_INFINITY);
   }

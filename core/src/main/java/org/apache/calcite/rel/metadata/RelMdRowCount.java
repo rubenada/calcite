@@ -138,22 +138,13 @@ public class RelMdRowCount
     if (rowCount == null) {
       return null;
     }
-    if (rel.offset instanceof RexDynamicParam) {
-      return rowCount;
-    }
-    final int offset = rel.offset == null ? 0 : RexLiteral.intValue(rel.offset);
+
+    final long offset = rel.offset instanceof RexLiteral ? RexLiteral.longValue(rel.offset) : 0;
     rowCount = Math.max(rowCount - offset, 0D);
 
-    if (rel.fetch != null) {
-      if (rel.fetch instanceof RexDynamicParam) {
-        return rowCount;
-      }
-      final int limit = RexLiteral.intValue(rel.fetch);
-      if (limit < rowCount) {
-        return (double) limit;
-      }
-    }
-    return rowCount;
+    final double limit =
+        rel.fetch instanceof RexLiteral ? RexLiteral.longValue(rel.fetch) : rowCount;
+    return limit < rowCount ? limit : rowCount;
   }
 
   public Double getRowCount(EnumerableLimit rel, RelMetadataQuery mq) {
@@ -161,22 +152,19 @@ public class RelMdRowCount
     if (rowCount == null) {
       return null;
     }
-    if (rel.offset instanceof RexDynamicParam) {
-      return rowCount;
-    }
-    final int offset = rel.offset == null ? 0 : RexLiteral.intValue(rel.offset);
+
+    final long offset = rel.offset instanceof RexLiteral ? RexLiteral.longValue(rel.offset) : 0;
     rowCount = Math.max(rowCount - offset, 0D);
 
-    if (rel.fetch != null) {
-      if (rel.fetch instanceof RexDynamicParam) {
-        return rowCount;
-      }
-      final int limit = RexLiteral.intValue(rel.fetch);
-      if (limit < rowCount) {
-        return (double) limit;
-      }
-    }
-    return rowCount;
+    final double limit =
+        rel.fetch instanceof RexLiteral ? RexLiteral.longValue(rel.fetch) : rowCount;
+    return limit < rowCount ? limit : rowCount;
+  }
+
+  public @Nullable Double getRowCount(Sample rel, RelMetadataQuery mq) {
+    final Double inputRowCount = mq.getRowCount(rel.getInput());
+    final double sampleRate = rel.getSamplingParameters().sampleRate.doubleValue();
+    return sampleRate * inputRowCount;
   }
 
   // Covers Converter, Interpreter
