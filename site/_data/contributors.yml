@@ -162,6 +162,33 @@
   githubId: nishantmonu51
   org: Hortonworks
   role: Committer
+- name: Oliver Lee
+  apacheId: oliver
+  githubId: olivrlee
+  org: Google
+  role: Committer
+- name: Ran Tao
+  apacheId: taoran
+  githubId: chucheng92
+  pronouns: he/him
+  org: ByteDance
+  role: Committer
+- name: Ruben Quesada Lopez
+  apacheId: rubenql
+  githubId: rubenada
+  org: Cloudera
+  role: PMC
+- name: Rui Wang
+  apacheId: amaliujia
+  githubId: amaliujia
+  org: Google
+  role: Committer
+- name: Runkang He
+  apacheId: herunkang
+  githubId: herunkang2018
+  pronouns: he/him
+  org: ByteDance
+  role: Committer
 - name: Sergey Nuyanzin
   apacheId: snuyanzin
   githubId: snuyanzin
