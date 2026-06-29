@@ -179,48 +179,46 @@ LogicalProject(NAME=[$0])
     LogicalProject(NAME=[$1])
       LogicalTableScan(table=[[CATALOG, SALES, DEPT]])
 ]]>
-        </Resource>
-        <Resource name="sql">
-            <![CDATA[select name from (select name from dept group by name)]]>
-        </Resource>
-    </TestCase>
-    <TestCase name="testGroupBug281b">
-        <Resource name="plan">
-            <![CDATA[
-LogicalProject(NAME=[$1], FOO=[$2])
-  LogicalProject(DEPTNO=[$1], NAME=[$0], FOO=[$2])
-    LogicalAggregate(group=[{0, 1}], FOO=[COUNT()])
-      LogicalProject(NAME=[$1], DEPTNO=[$0])
-        LogicalTableScan(table=[[CATALOG, SALES, DEPT]])
+    </Resource>
+  </TestCase>
+  <TestCase name="testCollectionTableWithCursorParamUnion">
+    <Resource name="sql">
+      <![CDATA[select * from table(dedup(cursor(select ename from emp union all select ename from emp), 'NAME'))]]>
+    </Resource>
+    <Resource name="plan">
+      <![CDATA[
+LogicalProject(NAME=[$0])
+  LogicalTableFunctionScan(invocation=[DEDUP(CAST($0):CURSOR NOT NULL, 'NAME')], rowType=[RecordType(VARCHAR(1024) NAME)])
+    LogicalUnion(all=[true])
+      LogicalProject(ENAME=[$1])
+        LogicalTableScan(table=[[CATALOG, SALES, EMP]])
+      LogicalProject(ENAME=[$1])
+        LogicalTableScan(table=[[CATALOG, SALES, EMP]])
 ]]>
-        </Resource>
-        <Resource name="sql">
-            <![CDATA[select name, foo from (
-select deptno, name, count(deptno) as foo
-from dept
-group by name, deptno, name)]]>
-        </Resource>
-    </TestCase>
-    <TestCase name="testAggDistinct">
-        <Resource name="plan">
-            <![CDATA[
-LogicalAggregate(group=[{0}], EXPR$1=[SUM($1)], EXPR$2=[SUM(DISTINCT $1)], EXPR$3=[COUNT()])
-  LogicalProject(DEPTNO=[$7], SAL=[$5])
-    LogicalTableScan(table=[[CATALOG, SALES, EMP]])
+    </Resource>
+  </TestCase>
+  <TestCase name="testCollectionTableWithCursorParamUnionDistinct">
+    <Resource name="sql">
+      <![CDATA[select * from table(dedup(cursor(select ename from emp union select ename from emp), 'NAME'))]]>
+    </Resource>
+    <Resource name="plan">
+      <![CDATA[
+LogicalProject(NAME=[$0])
+  LogicalTableFunctionScan(invocation=[DEDUP(CAST($0):CURSOR NOT NULL, 'NAME')], rowType=[RecordType(VARCHAR(1024) NAME)])
+    LogicalUnion(all=[false])
+      LogicalProject(ENAME=[$1])
+        LogicalTableScan(table=[[CATALOG, SALES, EMP]])
+      LogicalProject(ENAME=[$1])
+        LogicalTableScan(table=[[CATALOG, SALES, EMP]])
 ]]>
-        </Resource>
-        <Resource name="sql">
-            <![CDATA[select deptno, sum(sal), sum(distinct sal), count(*)
-from emp
-group by deptno]]>
-        </Resource>
-    </TestCase>
-    <TestCase name="testCollectionTableWithLateral">
-        <Resource name="sql">
-            <![CDATA[select * from dept, lateral table(ramp(dept.deptno))]]>
-        </Resource>
-        <Resource name="plan">
-            <![CDATA[
+    </Resource>
+  </TestCase>
+  <TestCase name="testCollectionTableWithLateral">
+    <Resource name="sql">
+      <![CDATA[select * from dept, lateral table(ramp(dept.deptno))]]>
+    </Resource>
+    <Resource name="plan">
+      <![CDATA[
 LogicalProject(DEPTNO=[$0], NAME=[$1], I=[$2])
   LogicalCorrelate(correlation=[$cor0], joinType=[inner], requiredColumns=[{0}])
     LogicalTableScan(table=[[CATALOG, SALES, DEPT]])

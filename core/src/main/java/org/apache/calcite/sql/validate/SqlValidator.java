@@ -570,12 +570,25 @@ public interface SqlValidator {
   SqlValidatorScope getMatchRecognizeScope(SqlMatchRecognize node);
 
   /**
-   * Declares a SELECT expression as a cursor.
+   * Returns the lambda expression scope.
    *
-   * @param select select expression associated with the cursor
-   * @param scope  scope of the parent query associated with the cursor
+   * @param node Lambda expression
+   * @return naming scope for lambda expression
    */
-  void declareCursor(SqlSelect select, SqlValidatorScope scope);
+  SqlValidatorScope getLambdaScope(SqlLambda node);
+
+  /**
+   * Returns a scope that cannot see anything.
+   */
+  SqlValidatorScope getEmptyScope();
+
+  /**
+   * Declares a query expression as a cursor.
+   *
+   * @param query query expression associated with the cursor
+   * @param scope scope of the parent query associated with the cursor
+   */
+  void declareCursor(SqlNode query, SqlValidatorScope scope);
 
   /**
    * Pushes a new instance of a function call on to a function call stack.

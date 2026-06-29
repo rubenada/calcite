@@ -23,11 +23,20 @@ import org.apache.calcite.config.Lex;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeSystem;
 import org.apache.calcite.sql.SqlCollation;
+import org.apache.calcite.sql.SqlFunction;
+import org.apache.calcite.sql.SqlFunctionCategory;
+import org.apache.calcite.sql.SqlIdentifier;
+import org.apache.calcite.sql.SqlKind;
+import org.apache.calcite.sql.SqlLiteral;
+import org.apache.calcite.sql.SqlNode;
+import org.apache.calcite.sql.SqlNodeList;
 import org.apache.calcite.sql.SqlOperator;
 import org.apache.calcite.sql.SqlSpecialOperator;
 import org.apache.calcite.sql.fun.OracleSqlOperatorTable;
 import org.apache.calcite.sql.fun.SqlStdOperatorTable;
-import org.apache.calcite.sql.test.SqlTester;
+import org.apache.calcite.sql.parser.SqlParseException;
+import org.apache.calcite.sql.parser.SqlParser;
+import org.apache.calcite.sql.parser.SqlParserPos;
 import org.apache.calcite.sql.type.ArraySqlType;
 import org.apache.calcite.sql.type.SqlTypeFactoryImpl;
 import org.apache.calcite.sql.type.SqlTypeName;
@@ -39,6 +48,9 @@ import org.apache.calcite.sql.validate.SqlConformanceEnum;
 import org.apache.calcite.sql.validate.SqlDelegatingConformance;
 import org.apache.calcite.sql.validate.SqlMonotonicity;
 import org.apache.calcite.sql.validate.SqlValidator;
+import org.apache.calcite.sql.validate.SqlValidatorCatalogReader;
+import org.apache.calcite.sql.validate.SqlValidatorImpl;
+import org.apache.calcite.sql.validate.SqlValidatorScope;
 import org.apache.calcite.sql.validate.SqlValidatorUtil;
 import org.apache.calcite.util.Bug;
 import org.apache.calcite.util.ImmutableBitSet;
@@ -62,11 +74,21 @@ import java.util.Locale;
 import java.util.Objects;
 import java.util.function.Consumer;
 
+import static org.apache.calcite.test.Matchers.isCharset;
+
+import static org.hamcrest.CoreMatchers.containsString;
 import static org.hamcrest.CoreMatchers.equalTo;
 import static org.hamcrest.CoreMatchers.is;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertThat;
-import static org.junit.Assert.assertTrue;
+import static org.hamcrest.CoreMatchers.nullValue;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.hasToString;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+
+import static java.util.Arrays.asList;
 
 /**
  * Concrete child class of {@link SqlValidatorTestCase}, containing lots of unit
@@ -7879,11 +7901,154 @@ public class SqlValidatorTest extends SqlValidatorTestCase {
         "Object 'BLOOP' not found");
   }
 
-  @Test public void testScalarSubQuery() {
-    check("SELECT  ename,(select name from dept where deptno=1) FROM emp");
-    checkFails(
-        "SELECT ename,(^select losal, hisal from salgrade where grade=1^) FROM emp",
-        "Cannot apply '\\$SCALAR_QUERY' to arguments of type '\\$SCALAR_QUERY\\(<RECORDTYPE\\(INTEGER LOSAL, INTEGER HISAL\\)>\\)'\\. Supported form\\(s\\): '\\$SCALAR_QUERY\\(<RECORDTYPE\\(SINGLE FIELD\\)>\\)'");
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-7217">[CALCITE-7217]
+   * LATERAL is lost after validation</a> and
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-7312">[CALCITE-7312]
+   * Alias is not auto generated for LATERAL TABLE</a>.
+   * */
+  @Test void testCollectionTableWithLateralRewrite() {
+    sql("select * from emp, lateral table(ramp(emp.deptno)), dept")
+        .rewritesTo("SELECT *\n"
+            + "FROM `EMP`,\n"
+            + "LATERAL TABLE(RAMP(`EMP`.`DEPTNO`)),\n"
+            + "`DEPT`");
+    // SELECT 1 to save space since test is verifying alias for the case of LATERAL TABLE
+    sql("select 1 from emp, lateral table(ramp(emp.deptno)), dept")
+        .withValidatorIdentifierExpansion(true)
+        .rewritesTo("SELECT 1\n"
+            + "FROM `CATALOG`.`SALES`.`EMP` AS `EMP`,\n"
+            + "LATERAL TABLE(RAMP(`EMP`.`DEPTNO`)) AS `EXPR$0`,\n"
+            + "`CATALOG`.`SALES`.`DEPT` AS `DEPT`");
+    // As above, with alias
+    sql("select * from emp, lateral table(ramp(emp.deptno)) as t(a), dept")
+        .rewritesTo("SELECT *\n"
+            +  "FROM `EMP`,\n"
+            +  "LATERAL TABLE(RAMP(`EMP`.`DEPTNO`)) AS `T` (`A`),\n"
+            +  "`DEPT`");
+    sql("select *\n"
+        + "from dept,\n"
+        + "  lateral table(ramp(deptno))\n"
+        + "  cross join (values ('A'), ('B'))")
+        .rewritesTo("SELECT *\n"
+            +  "FROM `DEPT`,\n"
+            +  "LATERAL TABLE(RAMP(`DEPTNO`))\n"
+            +  "CROSS JOIN (VALUES ROW('A'),\n"
+            +  "ROW('B'))");
+    // As above, using NATURAL JOIN
+    sql("select *\n"
+        + "from dept,\n"
+        + "  lateral table(ramp(deptno))\n"
+        + "  natural join emp")
+        .rewritesTo("SELECT *\n"
+            +  "FROM `DEPT`,\n"
+            +  "LATERAL TABLE(RAMP(`DEPTNO`))\n"
+            +  "NATURAL INNER JOIN `EMP`");
+    // As above, using comma
+    sql("select *\n"
+        + "from emp,\n"
+        + "  lateral (select * from dept where dept.deptno = emp.deptno),\n"
+        + "  emp as e2")
+        .rewritesTo("SELECT *\n"
+            +  "FROM `EMP`,\n"
+            +  "LATERAL (SELECT *\n"
+            +  "FROM `DEPT`\n"
+            +  "WHERE `DEPT`.`DEPTNO` = `EMP`.`DEPTNO`),\n"
+            +  "`EMP` AS `E2`");
+    // LATERAL in left part of join
+    sql("select * from lateral table(ramp(1234)), emp")
+        .rewritesTo("SELECT *\n"
+            +  "FROM LATERAL TABLE(RAMP(1234)),\n"
+            +  "`EMP`");
+    // SELECT 1 to save space since test is verifying alias for the case of LATERAL TABLE
+    sql("select 1 from lateral table(ramp(1234)), emp")
+        .withValidatorIdentifierExpansion(true)
+        .rewritesTo("SELECT 1\n"
+            + "FROM LATERAL TABLE(RAMP(1234)) AS `EXPR$0`,\n"
+            + "`CATALOG`.`SALES`.`EMP` AS `EMP`");
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-5261">[CALCITE-5261]
+   * UNION(ALL) inside of the CURSOR throws an exception while validating the query</a>.
+   * */
+  @Test void testCollectionTableWithCursorParam() {
+    sql("select * from table(dedup(cursor(select * from emp),'ename'))")
+        .type("RecordType(VARCHAR(1024) NOT NULL NAME) NOT NULL");
+    sql("select * from table(dedup(cursor(select * from ^bloop^),'ename'))")
+        .fails("Object 'BLOOP' not found");
+    sql("select * from table(dedup(cursor(select ename from emp union all "
+        + "select ename from emp), 'ename'))")
+        .type("RecordType(VARCHAR(1024) NOT NULL NAME) NOT NULL");
+    sql("select * from table(dedup(cursor(select ename from emp union "
+        + "select ename from emp), 'ename'))")
+        .type("RecordType(VARCHAR(1024) NOT NULL NAME) NOT NULL");
+    sql("select * from table(dedup(cursor(values ('a'), ('b')), 'COLUMN0'))")
+        .type("RecordType(VARCHAR(1024) NOT NULL NAME) NOT NULL");
+    sql("select * from table(dedup(cursor(with cte as (select ename from emp) "
+        + "select * from cte), 'ENAME'))")
+        .type("RecordType(VARCHAR(1024) NOT NULL NAME) NOT NULL");
+  }
+
+  @Test void testDeclareCursorUnexpectedKind() {
+    final SqlValidator validator = fixture().factory.createValidator();
+    validator.pushFunctionCall();
+    final SqlCall query =
+        new SqlBasicCall(SqlStdOperatorTable.EXPLICIT_TABLE,
+        new SqlNodeList(
+            ImmutableList.of(SqlLiteral.createNull(SqlParserPos.ZERO)),
+            SqlParserPos.ZERO),
+        SqlParserPos.ZERO);
+    final SqlValidatorScope scope = validator.getEmptyScope();
+    final AssertionError error =
+        assertThrows(AssertionError.class, () ->
+            ((SqlValidatorImpl) validator).declareCursor(query, scope));
+    assertThat(error.getMessage(), containsString("EXPLICIT_TABLE"));
+  }
+
+  @Test void testTemporalTable() {
+    sql("select stream * from orders, ^products^ for system_time as of"
+        + " TIMESTAMP '2011-01-02 00:00:00'")
+        .fails("Table 'PRODUCTS' is not a temporal table, "
+            + "can not be queried in system time period specification");
+
+    sql("select stream * from orders, ^products^ for system_time as of"
+        + " TIMESTAMP WITH LOCAL TIME ZONE '2011-01-02 00:00:00'")
+        .fails("Table 'PRODUCTS' is not a temporal table, "
+            + "can not be queried in system time period specification");
+
+    sql("select stream * from orders, products_temporal "
+        + "for system_time as of ^'2011-01-02 00:00:00'^")
+        .fails("The system time period specification expects Timestamp type but is 'CHAR'");
+
+    // verify inner join with a specific timestamp
+    sql("select stream * from orders join products_temporal "
+        + "for system_time as of timestamp '2011-01-02 00:00:00' "
+        + "on orders.productid = products_temporal.productid").ok();
+
+    // verify left join with a timestamp field
+    sql("select stream * from orders left join products_temporal "
+        + "for system_time as of orders.rowtime "
+        + "on orders.productid = products_temporal.productid").ok();
+
+    // verify left join with a timestamp expression
+    sql("select stream * from orders left join products_temporal\n"
+        + "for system_time as of orders.rowtime - INTERVAL '3' DAY\n"
+        + "on orders.productid = products_temporal.productid").ok();
+
+    // verify left join with a datetime value function
+    sql("select stream * from orders left join products_temporal\n"
+        + "for system_time as of CURRENT_TIMESTAMP\n"
+        + "on orders.productid = products_temporal.productid").ok();
+  }
+
+  @Test void testScalarSubQuery() {
+    sql("SELECT  ename,(select name from dept where deptno=1) FROM emp").ok();
+    sql("SELECT ename,^(select losal, hisal from salgrade where grade=1)^ FROM emp")
+        .fails("Cannot apply '\\$SCALAR_QUERY' to arguments of type "
+            + "'\\$SCALAR_QUERY\\(<ROW\\(INTEGER LOSAL, "
+            + "INTEGER HISAL\\)>\\)'\\. Supported form\\(s\\): "
+            + "'\\$SCALAR_QUERY\\(<ROW\\(SINGLE FIELD\\)>\\)'");
 
     // Note that X is a field (not a record) and is nullable even though
     // EMP.NAME is NOT NULL.
