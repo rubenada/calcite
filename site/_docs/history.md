@@ -49,6 +49,16 @@ other software versions as specified in gradle.properties.
 #### Breaking Changes
 {: #breaking-1-43-0}
 
+* [<a href="https://issues.apache.org/jira/browse/CALCITE-TBD">CALCITE-TBD</a>]
+  `calcite-file` now rejects SSRF-shaped URL operands by default. URLs supplied
+  to the url table operand (or reaching `FileReader` directly) must use the file
+  or https scheme by default, and must not resolve to loopback, link-local,
+  RFC 1918 / 6598 private ranges, or IPv6 ULA addresses. This is a behavior change:
+  models that used `http://` URLs, `ftp://` URLs, or URLs pointing at internal-network
+  hosts will fail at schema-construction or fetch time. To restore prior behavior
+  for a specific deployment, set `-Dcalcite.file.allowedUrlSchemes=file,http,https,ftp`
+  and/or `-Dcalcite.file.blockPrivateNetworks=false`. See the sysprop javadoc
+  for the full reserved-address list.
 * [<a href="https://issues.apache.org/jira/browse/CALCITE-7580">CALCITE-7580</a>]
   Remove Gandiva dependency from Arrow adapter. Arrow adapter projection and
   filter evaluation now run in Java, and the `arrow-gandiva` dependency is no

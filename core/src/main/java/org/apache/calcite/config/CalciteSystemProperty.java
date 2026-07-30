@@ -473,6 +473,68 @@ public final class CalciteSystemProperty<T> {
   public static final CalciteSystemProperty<String> MODEL_CLASSES_DENIED =
       stringProperty("calcite.model.classes.denied", "");
 
+  /**
+   * Comma-separated URL-scheme allowlist for the file adapter. When a
+   * table's {@code url} operand is resolved, or a URL reaches
+   * the {@code FileReader}, its scheme must appear in this list.
+   *
+   * <p>Default {@code "file,https"}: the narrowest posture that
+   * keeps the by-design local-file access (see the P2 carve-out in the
+   * security threat model) working, permits ordinary TLS fetches, and
+   * blocks plaintext {@code http} and {@code ftp} by default. Set to
+   * {@code "file"} to disable all network fetches. Set to the empty
+   * string to disable the check entirely (not recommended).
+   *
+   * <p>Rationale: per the security threat model, a file adapter that
+   * fetches a URL is making a network request and falls under P3
+   * (no server-side request forgery). An unrestricted scheme list
+   * accepts {@code ftp} and plaintext {@code http}, both of which
+   * enable attacker-directed outbound connections.
+   */
+  public static final CalciteSystemProperty<String> FILE_ADAPTER_ALLOWED_URL_SCHEMES =
+      stringProperty("calcite.file.allowedUrlSchemes", "file,https");
+
+  /**
+   * Whether the file adapter blocks fetches to loopback, link-local,
+   * private, and reserved network addresses. Default {@code true}.
+   * When true, the file adapter refuses to open {@code http},
+   * {@code https}, or {@code ftp} URLs whose host resolves to any of:
+   *
+   * <ul>
+   *   <li>loopback ({@code 127.0.0.0/8}, {@code ::1});</li>
+   *   <li>link-local ({@code 169.254.0.0/16}, {@code fe80::/10}),
+   *       including the cloud metadata endpoint
+   *       {@code 169.254.169.254};</li>
+   *   <li>RFC 1918 private ranges
+   *       ({@code 10/8}, {@code 172.16/12}, {@code 192.168/16});</li>
+   *   <li>RFC 6598 CGNAT space ({@code 100.64.0.0/10}), which contains
+   *       Alibaba Cloud's metadata endpoint {@code 100.100.100.200}
+   *       and many Kubernetes pod networks;</li>
+   *   <li>the "this network" block ({@code 0.0.0.0/8});</li>
+   *   <li>the IPv6 Unique Local Address range ({@code fc00::/7}, RFC
+   *       4193), which contains AWS's IPv6 IMDS
+   *       ({@code fd00:ec2::254}).</li>
+   * </ul>
+   *
+   * <p>IPv4-mapped ({@code ::ffff:a.b.c.d}) and IPv4-compatible
+   * ({@code ::a.b.c.d}) IPv6 addresses are unwrapped before
+   * classification, so wrapping a blocked IPv4 destination in a
+   * synthetic IPv6 does not bypass the check.
+   *
+   * <p>The check is best-effort: it resolves the host name once at
+   * fetch-time. A DNS-rebinding adversary that returns a public
+   * address at check-time and a private address at connect-time can
+   * still cross this boundary. Full defense requires bind-time IP
+   * pinning inside the URL-opening path; that is a separate change.
+   *
+   * <p>Set to {@code false} only in deployments that legitimately
+   * fetch from private addresses (e.g. an internal-network file
+   * server the operator has configured, and where the query author is
+   * trusted to reach it).
+   */
+  public static final CalciteSystemProperty<Boolean> FILE_ADAPTER_BLOCK_PRIVATE_NETWORKS =
+      booleanProperty("calcite.file.blockPrivateNetworks", true);
+
   private static CalciteSystemProperty<Boolean> booleanProperty(String key,
       boolean defaultValue) {
     // Note that "" -> true (convenient for command-lines flags like '-Dflag')

@@ -123,6 +123,9 @@ class FileSchema extends AbstractSchema {
       Map<String, Object> tableDef) {
     final String tableName = (String) tableDef.get("name");
     final String url = (String) tableDef.get("url");
+    // P3 (no-SSRF) enforcement: reject disallowed schemes and (by default)
+    // private-network destinations before opening the URL.
+    FileSchemaUrlGuard.check(url);
     final Source source0 = Sources.url(url);
     final Source source;
     if (baseDirectory == null) {

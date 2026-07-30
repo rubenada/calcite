@@ -25,15 +25,21 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.Reader;
+import java.net.InetAddress;
 import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URL;
+import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.Set;
 import java.util.zip.GZIPInputStream;
 
 import static java.util.Objects.requireNonNull;
@@ -87,6 +93,214 @@ public abstract class Sources {
     } catch (MalformedURLException | IllegalArgumentException e) {
       throw new RuntimeException("Malformed URL: '" + url + "'", e);
     }
+  }
+
+  /**
+   * Rejects a URL whose scheme is not in {@code allowedSchemes}. When
+   * {@code allowedSchemes} is empty this method is a no-op (permissive
+   * fallback). Scheme comparison is case-insensitive.
+   *
+   * <p>This helper enforces the P3 (no-SSRF) boundary of the Calcite security
+   * threat model for adapters that resolve attacker-influenced URLs:
+   * any URL-fetching schema operand must resolve to a scheme the
+   * operator has chosen to permit.
+   *
+   * @throws SecurityException if the URL's scheme is not allowed, or
+   *   the URL is malformed.
+   */
+  public static void checkAllowedScheme(String url, Set<String> allowedSchemes) {
+    if (allowedSchemes.isEmpty()) {
+      return;
+    }
+    final URI uri;
+    try {
+      uri = new URI(url);
+    } catch (URISyntaxException e) {
+      throw new SecurityException("Malformed URL: '" + url + "'", e);
+    }
+    final String scheme = uri.getScheme();
+    if (scheme == null
+        || !allowedSchemes.contains(scheme.toLowerCase(Locale.ROOT))) {
+      throw new SecurityException("URL scheme '" + scheme
+          + "' is not in the configured allowlist " + allowedSchemes);
+    }
+  }
+
+  /**
+   * Parses a comma-separated allowlist of URL schemes into a lowercased
+   * set. Empty entries and whitespace are stripped.
+   */
+  public static Set<String> parseAllowedUrlSchemes(String raw) {
+    if (raw == null || raw.isEmpty()) {
+      return Collections.emptySet();
+    }
+    final Set<String> out = new LinkedHashSet<>();
+    for (String s : raw.split(",")) {
+      final String trimmed = s.trim().toLowerCase(Locale.ROOT);
+      if (!trimmed.isEmpty()) {
+        out.add(trimmed);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Rejects a URL whose host resolves to a loopback, link-local,
+   * private (RFC-1918), CGNAT (RFC 6598), IPv6 unique-local (RFC 4193),
+   * "current network" ({@code 0.0.0.0/8}), or well-known cloud metadata
+   * endpoint. No-op for non-network schemes (anything other than
+   * {@code http}, {@code https}, {@code ftp}).
+   *
+   * <p>Covers, beyond {@link InetAddress#isLoopbackAddress()} /
+   * {@link InetAddress#isLinkLocalAddress()} /
+   * {@link InetAddress#isSiteLocalAddress()} /
+   * {@link InetAddress#isAnyLocalAddress()}:
+   *
+   * <ul>
+   *   <li>{@code 169.254.169.254} &mdash; the AWS/GCP/Azure/OCI IPv4
+   *       metadata endpoint (link-local, but checked explicitly so
+   *       the error message is unambiguous);</li>
+   *   <li>{@code 100.64.0.0/10} &mdash; RFC 6598 CGNAT space, which
+   *       includes Alibaba Cloud's metadata endpoint
+   *       {@code 100.100.100.200} and many Kubernetes pod networks
+   *       and which is <em>not</em> covered by
+   *       {@code isSiteLocalAddress()};</li>
+   *   <li>{@code 0.0.0.0/8} &mdash; RFC 1122 "this network";
+   *       {@code isAnyLocalAddress()} matches only the exact address
+   *       {@code 0.0.0.0}, not the whole block;</li>
+   *   <li>{@code fc00::/7} &mdash; the entire IPv6 Unique Local
+   *       Address range (RFC 4193), which contains AWS's IPv6 IMDS
+   *       ({@code fd00:ec2::254}) and any operator's ULA metadata
+   *       scheme. {@code isSiteLocalAddress()} on IPv6 covers only
+   *       the deprecated {@code fec0::/10}.</li>
+   * </ul>
+   *
+   * <p>IPv4-mapped and IPv4-compatible IPv6 addresses are unwrapped
+   * before classification: {@code ::ffff:169.254.169.254} and
+   * {@code ::169.254.169.254} are treated as their IPv4 counterparts,
+   * because the wrapping form's {@code Inet6Address.is*Address()}
+   * methods inspect the top nibble ({@code 0xfe80} link-local,
+   * {@code 0xfc/7} ULA) and do not look at the mapped payload.
+   *
+   * <p>Best-effort against DNS-time attacker control: a DNS-rebinding
+   * adversary can still switch the resolved address between check-time
+   * and connect-time. Full defense requires bind-time IP pinning
+   * inside the URL-opening path.
+   *
+   * @throws SecurityException if the URL targets a blocked host.
+   */
+  public static void checkNotPrivateNetwork(String url) {
+    final URI uri;
+    try {
+      uri = new URI(url);
+    } catch (URISyntaxException e) {
+      throw new SecurityException("Malformed URL: '" + url + "'", e);
+    }
+    final String scheme = uri.getScheme();
+    if (scheme == null) {
+      return;
+    }
+    final String s = scheme.toLowerCase(Locale.ROOT);
+    if (!s.equals("http") && !s.equals("https") && !s.equals("ftp")) {
+      return;
+    }
+    final String host = uri.getHost();
+    if (host == null || host.isEmpty()) {
+      throw new SecurityException("URL '" + url + "' has no valid host");
+    }
+    final InetAddress[] addrs;
+    try {
+      addrs = InetAddress.getAllByName(host);
+    } catch (UnknownHostException e) {
+      throw new SecurityException("Cannot resolve host '" + host + "'", e);
+    }
+    for (InetAddress a : addrs) {
+      // Unwrap IPv4-mapped / IPv4-compatible IPv6 (e.g.
+      // ::ffff:169.254.169.254 or ::169.254.169.254 -> 169.254.169.254)
+      // so IPv4 range checks below see the real payload.
+      final InetAddress target = unwrapIpv4InIpv6(a);
+      if (target.isLoopbackAddress()
+          || target.isLinkLocalAddress()
+          || target.isSiteLocalAddress()
+          || target.isAnyLocalAddress()
+          || isReservedOrCloudMetadataIp(target)
+          || isIpv6UniqueLocal(target)) {
+        throw new SecurityException("URL '" + url
+            + "' resolves to a blocked network address: " + a.getHostAddress());
+      }
+    }
+  }
+
+  /** Unwraps an IPv4-mapped ({@code ::ffff:a.b.c.d}) or IPv4-compatible
+   * ({@code ::a.b.c.d}) IPv6 address to its IPv4 counterpart. Leaves
+   * genuine IPv6 addresses untouched. */
+  private static InetAddress unwrapIpv4InIpv6(InetAddress addr) {
+    final byte[] bytes = addr.getAddress();
+    if (bytes.length != 16) {
+      return addr;
+    }
+    // First 10 bytes must be zero for both mapped and compatible forms.
+    for (int i = 0; i < 10; i++) {
+      if (bytes[i] != 0) {
+        return addr;
+      }
+    }
+    final int b10 = bytes[10] & 0xff;
+    final int b11 = bytes[11] & 0xff;
+    // IPv4-mapped: bytes 10..11 are 0xff,0xff.
+    // IPv4-compatible: bytes 10..11 are 0,0 (deprecated but still parseable).
+    // The all-zero compatible form must have a nonzero payload; ::0.0.0.0
+    // is the unspecified address and is handled by isAnyLocalAddress().
+    final boolean mapped = b10 == 0xff && b11 == 0xff;
+    final boolean compatible = b10 == 0 && b11 == 0
+        && (bytes[12] != 0 || bytes[13] != 0
+            || bytes[14] != 0 || bytes[15] != 0);
+    if (mapped || compatible) {
+      try {
+        return InetAddress.getByAddress(Arrays.copyOfRange(bytes, 12, 16));
+      } catch (UnknownHostException ignored) {
+        // Fall through and use the original address.
+      }
+    }
+    return addr;
+  }
+
+  private static boolean isReservedOrCloudMetadataIp(InetAddress a) {
+    final byte[] b = a.getAddress();
+    if (b.length != 4) {
+      return false;
+    }
+    final int b0 = b[0] & 0xff;
+    final int b1 = b[1] & 0xff;
+    final int b2 = b[2] & 0xff;
+    final int b3 = b[3] & 0xff;
+
+    // 169.254.169.254 - AWS/GCP/Azure/OCI IPv4 metadata endpoint.
+    if (b0 == 169 && b1 == 254 && b2 == 169 && b3 == 254) {
+      return true;
+    }
+    // 100.64.0.0/10 - RFC 6598 CGNAT space; includes Alibaba Cloud's
+    // metadata endpoint 100.100.100.200 and many K8s pod networks.
+    if (b0 == 100 && (b1 & 0xc0) == 64) {
+      return true;
+    }
+    // 0.0.0.0/8 - RFC 1122 "current network". isAnyLocalAddress()
+    // covers only the exact address 0.0.0.0.
+    if (b0 == 0) {
+      return true;
+    }
+    return false;
+  }
+
+  /** True if {@code a} is an IPv6 Unique Local Address (RFC 4193,
+   * {@code fc00::/7}). Java's {@code isSiteLocalAddress()} on IPv6
+   * covers only the deprecated {@code fec0::/10}, so ULAs -- which
+   * are where every documented IPv6 cloud metadata endpoint lives --
+   * are otherwise unclassified. */
+  private static boolean isIpv6UniqueLocal(InetAddress a) {
+    final byte[] b = a.getAddress();
+    // Top 7 bits are 1111110 (i.e. first byte is 0xfc or 0xfd).
+    return b.length == 16 && (b[0] & 0xfe) == 0xfc;
   }
 
   /** Looks for a suffix on a path and returns

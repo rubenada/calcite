@@ -64,6 +64,19 @@ public class FileReader implements Iterable<Elements> {
     final Document doc;
     try {
       String proto = source.protocol();
+      // P3 (no-SSRF) defense in depth: even if a code path reached FileReader
+      // bypassing FileSchema.addTable, the scheme/host policy still
+      // applies before any network fetch. The guard throws
+      // SecurityException on policy violations; wrap it as a
+      // FileReaderException so the FileReader API's declared
+      // failure mode is what escapes.
+      if (Arrays.asList("http", "https", "ftp").contains(proto)) {
+        try {
+          FileSchemaUrlGuard.check(source.url().toString());
+        } catch (SecurityException e) {
+          throw new FileReaderException("Cannot read " + source, e);
+        }
+      }
       if ("file".equals(proto)) {
         doc = Jsoup.parse(source.file(), this.charset.name());
       } else if (Arrays.asList("http", "https", "ftp").contains(proto)) {
