@@ -28,8 +28,7 @@ import org.apache.calcite.rel.type.RelDataTypeField;
 import org.apache.calcite.runtime.SqlFunctions.FlatProductInputType;
 import org.apache.calcite.sql.type.MapSqlType;
 import org.apache.calcite.util.BuiltInMethod;
-
-import com.google.common.primitives.Ints;
+import org.apache.calcite.util.ImmutableBitSet;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -56,6 +55,21 @@ public class EnumerableUncollect extends Uncollect implements EnumerableRel {
     assert getConvention() == child.getConvention();
   }
 
+  /** Creates an EnumerableUncollect, with explicit control over which input
+   * fields are passed through unchanged and which are unnested.
+   *
+   * <p>Use {@link #create} unless you know what you're doing. */
+  public EnumerableUncollect(RelOptCluster cluster, RelTraitSet traitSet,
+      RelNode child, boolean withOrdinality, ImmutableBitSet passthroughFieldIndices,
+      ImmutableBitSet collectionFieldIndices, boolean expandStructFields,
+      boolean isOuter) {
+    super(cluster, traitSet, child, withOrdinality, Collections.emptyList(),
+        passthroughFieldIndices, collectionFieldIndices, expandStructFields,
+        isOuter);
+    assert getConvention() instanceof EnumerableConvention;
+    assert getConvention() == child.getConvention();
+  }
+
   /**
    * Creates an EnumerableUncollect.
    *
@@ -72,50 +86,75 @@ public class EnumerableUncollect extends Uncollect implements EnumerableRel {
     return new EnumerableUncollect(cluster, traitSet, input, withOrdinality);
   }
 
+  /**
+   * Creates an EnumerableUncollect that unnests the collection-typed fields at
+   * {@code collectionFieldIndices}, passing through the fields at
+   * {@code passthroughFieldIndices} unchanged and dropping all others.
+   *
+   * @param traitSet                Trait set
+   * @param input                   Input relational expression
+   * @param withOrdinality          Whether output should contain an ORDINALITY column
+   * @param passthroughFieldIndices 0-based indices of the input fields to pass through
+   *                                unchanged
+   * @param collectionFieldIndices  0-based indices of the input fields whose values are
+   *                                collections to unnest
+   * @param expandStructFields      If true, a collection whose element type is a struct
+   *                                produces one output column per struct field; if false,
+   *                                a single column typed as the whole element
+   * @param isOuter                 If true, preserves input rows with null/empty
+   *                                collections (LEFT JOIN); if false, drops them (INNER)
+   */
+  public static EnumerableUncollect create(RelTraitSet traitSet, RelNode input,
+      boolean withOrdinality, ImmutableBitSet passthroughFieldIndices,
+      ImmutableBitSet collectionFieldIndices, boolean expandStructFields,
+      boolean isOuter) {
+    final RelOptCluster cluster = input.getCluster();
+    return new EnumerableUncollect(cluster, traitSet, input, withOrdinality,
+        passthroughFieldIndices, collectionFieldIndices, expandStructFields,
+        isOuter);
+  }
+
   @Override public EnumerableUncollect copy(RelTraitSet traitSet,
       RelNode newInput) {
     return new EnumerableUncollect(getCluster(), traitSet, newInput,
-        withOrdinality);
+        withOrdinality, getPassthroughFieldIndices(), getCollectionFieldIndices(),
+        expandStructFields, isOuter);
   }
 
+  /** Implements Uncollect: some of the input fields are unnested,
+   * and some of them passed through unchanged.
+   * If {@link #isOuter} is true, rows with null/empty collections are preserved
+   * with NULL-padded element columns. */
   @Override public Result implement(EnumerableRelImplementor implementor, Prefer pref) {
+    final ImmutableBitSet passthroughIndices = getPassthroughFieldIndices();
+    final ImmutableBitSet collIndices = getCollectionFieldIndices();
     final BlockBuilder builder = new BlockBuilder();
     final EnumerableRel child = (EnumerableRel) getInput();
-    final Result result = implementor.visitChild(this, 0, child, pref);
+    final Result childResult = implementor.visitChild(this, 0, child, pref);
     final PhysType physType =
-        PhysTypeImpl.of(
-            implementor.getTypeFactory(),
-            getRowType(),
-            JavaRowFormat.LIST);
+        PhysTypeImpl.of(implementor.getTypeFactory(), getRowType(), JavaRowFormat.LIST);
 
-    // final Enumerable<List<Employee>> child = <<child adapter>>;
-    // return child.selectMany(FLAT_PRODUCT);
-    final Expression child_ =
-        builder.append(
-            "child", result.block);
-
+    // Compute element width and kind for each collection field.
+    final List<RelDataTypeField> inputFields =
+        getInput().getRowType().getFieldList();
     final List<Integer> fieldCounts = new ArrayList<>();
     final List<FlatProductInputType> inputTypes = new ArrayList<>();
-
-    Expression lambdaForStructWithSingleItem = null;
-    for (RelDataTypeField field : child.getRowType().getFieldList()) {
-      final RelDataType type = field.getType();
+    for (int idx : collIndices) {
+      final RelDataType type = inputFields.get(idx).getType();
       if (type instanceof MapSqlType) {
         fieldCounts.add(2);
         inputTypes.add(FlatProductInputType.MAP);
       } else {
         final RelDataType elementType = getComponentTypeOrThrow(type);
-        if (elementType.isStruct()) {
-          if (elementType.getFieldCount() == 1 && child.getRowType().getFieldList().size() == 1
-              && !withOrdinality) {
-            // Solves CALCITE-4063: if we are processing a single field, which is a struct with a
-            // single item inside, and no ordinality; the result must be a scalar, hence use a
-            // special lambda that does not return lists, but the (single) items within those lists
-            lambdaForStructWithSingleItem = Expressions.call(BuiltInMethod.FLAT_LIST.method);
-          } else {
-            fieldCounts.add(elementType.getFieldCount());
-            inputTypes.add(FlatProductInputType.LIST);
-          }
+        if (elementType.isStruct() && expandStructFields) {
+          fieldCounts.add(elementType.getFieldCount());
+          inputTypes.add(FlatProductInputType.LIST);
+        } else if (elementType.isStruct()) {
+          // A struct element kept whole occupies a single output column,
+          // like a scalar element, but its row value must be converted from
+          // the collection's internal list representation to Object[].
+          fieldCounts.add(-1);
+          inputTypes.add(FlatProductInputType.STRUCT);
         } else {
           fieldCounts.add(-1);
           inputTypes.add(FlatProductInputType.SCALAR);
@@ -123,13 +162,30 @@ public class EnumerableUncollect extends Uncollect implements EnumerableRel {
       }
     }
 
-    final Expression lambda = lambdaForStructWithSingleItem != null
-        ? lambdaForStructWithSingleItem
-        : Expressions.call(BuiltInMethod.FLAT_PRODUCT.method,
-            Expressions.constant(Ints.toArray(fieldCounts)),
-            Expressions.constant(withOrdinality),
+    Expression child_ = builder.append("child", childResult.block);
+    if (childResult.physType.getFormat() == JavaRowFormat.CUSTOM) {
+      // flatUncollect reads input rows as lists, arrays or scalars only
+      child_ =
+          builder.append("converted",
+              childResult.physType.convertTo(child_,
+                  inputFields.size() == 1 ? JavaRowFormat.SCALAR : JavaRowFormat.ARRAY));
+    }
+
+    // final Enumerable<List<Employee>> child = <<child adapter>>;
+    // return child.selectMany(
+    //     SqlFunctions.flatUncollect(passthroughIndices, collectionIndices,
+    //         fieldCounts, inputTypes, withOrdinality, inputFieldCount, outer));
+    final Expression lambda =
+        Expressions.call(BuiltInMethod.FLAT_UNCOLLECT.method,
+            Expressions.constant(passthroughIndices.toArray()),
+            Expressions.constant(collIndices.toArray()),
             Expressions.constant(
-                inputTypes.toArray(new FlatProductInputType[0])));
+                fieldCounts.stream().mapToInt(i -> i).toArray()),
+            Expressions.constant(
+                inputTypes.toArray(new FlatProductInputType[0])),
+            Expressions.constant(withOrdinality),
+            Expressions.constant(inputFields.size()),
+            Expressions.constant(isOuter));
     builder.add(
         Expressions.return_(null,
             Expressions.call(child_,
@@ -137,5 +193,4 @@ public class EnumerableUncollect extends Uncollect implements EnumerableRel {
                 lambda)));
     return implementor.result(physType, builder.toBlock());
   }
-
 }

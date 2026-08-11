@@ -206,8 +206,15 @@ public class SqlFunctions {
   // Note: this variable handling is inspired by Apache Spark
   private static final int MAX_ARRAY_LENGTH = Integer.MAX_VALUE - 15;
 
-  private static final Function1<List<Object>, Enumerable<Object>> LIST_AS_ENUMERABLE =
-      a0 -> a0 == null ? Linq4j.emptyEnumerable() : Linq4j.asEnumerable(a0);
+  /** Converts one element of a collection of structs to its Object[] struct
+   * value. Elements arrive as List or as Object[]; null elements stay null. */
+  @SuppressWarnings("rawtypes")
+  private static @Nullable Object structValue(@Nullable Object element) {
+    if (element == null || element instanceof Object[]) {
+      return element;
+    }
+    return ((List) element).toArray();
+  }
 
   @SuppressWarnings("unused")
   private static final Function1<Object[], Enumerable<@Nullable Object[]>> ARRAY_CARTESIAN_PRODUCT =
@@ -7499,73 +7506,251 @@ public class SqlFunctions {
   /**
    * Function that, given a certain List containing single-item structs (i.e. arrays / lists with
    * a single item), builds an Enumerable that returns those single items inside the structs.
+   *
+   * <p>Calcite no longer uses this function.
    */
   public static Function1<List<Object>, Enumerable<Object>> flatList() {
     return inputList -> Linq4j.asEnumerable(inputList).select(v -> structAccess(v, 0, null));
   }
 
-  public static Function1<Object, Enumerable<ComparableList<Comparable>>> flatProduct(
-      final int[] fieldCounts, final boolean withOrdinality,
-      final FlatProductInputType[] inputTypes) {
-    if (fieldCounts.length == 1) {
-      if (!withOrdinality && inputTypes[0] == FlatProductInputType.SCALAR) {
-        //noinspection unchecked
-        return (Function1) LIST_AS_ENUMERABLE;
-      } else {
-        return row -> p2(new Object[] { row }, fieldCounts, withOrdinality,
-            inputTypes);
-      }
+  /**
+   * Returns a function that implements the runtime of an
+   * {@link org.apache.calcite.rel.core.Uncollect}: for each input row it
+   * yields an enumerable of output rows, each holding the pass-through
+   * fields (in ascending input-index order) followed by the expanded
+   * elements of the collection fields.
+   *
+   * <p>Multiple collections combine with <em>zip</em> (positional pairing)
+   * semantics: the i-th output row pairs element {@code a[i]} with element
+   * {@code b[i]}, and shorter collections are padded with {@code NULL}. This
+   * is the standard semantics for SQL {@code UNNEST(a, b, ...)}.
+   *
+   * <p>When {@code outer}, a row whose collections are all empty or
+   * {@code NULL} still produces one output row, with every element column
+   * (and the ordinality column) set to {@code NULL} and the pass-through
+   * fields preserved. This is the LEFT JOIN semantics of {@code Uncollect}.
+   *
+   * @param passthroughIndices indices of the input fields to pass through,
+   *                           in ascending order
+   * @param collectionIndices  indices of the input fields that are collections,
+   *                           in the order their expansions appear in the output
+   * @param fieldCounts        output column count for each collection (-1 for a
+   *                           collection of scalars or of structs kept whole)
+   * @param inputTypes         type of elements in each unnested collection
+   *                           (SCALAR, LIST, STRUCT, or MAP)
+   * @param withOrdinality     whether to append a 1-based ORDINALITY column
+   * @param inputFieldCount    total number of fields in each input row; when 1,
+   *                           the input arrives in SCALAR row format (the row
+   *                           IS the field value)
+   * @param isOuter            if {@code true}, emit one NULL-padded row when all
+   *                           collections are null or empty (LEFT JOIN semantics);
+   *                           if {@code false}, drop the input row (INNER semantics)
+   */
+  @SuppressWarnings({"rawtypes", "unchecked"})
+  public static Function1<Object, Enumerable<FlatLists.ComparableList<Comparable>>>
+      flatUncollect(
+          final int[] passthroughIndices,
+          final int[] collectionIndices, final int[] fieldCounts,
+          final FlatProductInputType[] inputTypes,
+          final boolean withOrdinality,
+          final int inputFieldCount,
+          final boolean isOuter) {
+    // Output-column width contributed by each collection (A value of -1, indicating a
+    // collection of scalars or of structs kept whole, contributes 1 output column).
+    final int[] widths = new int[collectionIndices.length];
+    int totalElemWidth = 0;
+    for (int i = 0; i < collectionIndices.length; i++) {
+      widths[i] = fieldCounts[i] < 0 ? 1 : fieldCounts[i];
+      totalElemWidth += widths[i];
     }
-    return lists -> p2((Object[]) lists, fieldCounts, withOrdinality,
-        inputTypes);
+    final int expandedOutputFieldCount = totalElemWidth + (withOrdinality ? 1 : 0);
+    final int outputFieldCount = passthroughIndices.length + expandedOutputFieldCount;
+
+    final Function1<Object, Enumerable<FlatLists.ComparableList<Comparable>>> rows =
+        flatUncollectRows(passthroughIndices, collectionIndices, inputTypes,
+            withOrdinality, inputFieldCount, isOuter, widths, totalElemWidth,
+            outputFieldCount);
+
+    if (outputFieldCount == 1) {
+      // A one-field output row type (no pass-through fields, one collection
+      // field expanding to a single column, no ordinality) makes
+      // PhysTypeImpl optimize the row format down to SCALAR, under which
+      // rows are bare values rather than singleton lists; unwrap to match.
+      // The unwrapped value need not itself be Comparable (e.g. a struct
+      // kept whole), so operate on raw types to avoid an incorrect checkcast.
+      final Function1<Object, Enumerable> scalarRows = inputRowObj -> {
+        final Enumerable rawRows = rows.apply(inputRowObj);
+        return rawRows.select(row -> requireNonNull((List) row, "row").get(0));
+      };
+      return (Function1) scalarRows;
+    }
+    return rows;
   }
 
-  private static Enumerable<FlatLists.ComparableList<Comparable>> p2(
-      Object[] lists, int[] fieldCounts, boolean withOrdinality,
-      FlatProductInputType[] inputTypes) {
-    final List<Enumerator<List<Comparable>>> enumerators = new ArrayList<>();
-    int totalFieldCount = 0;
-    for (int i = 0; i < lists.length; i++) {
-      int fieldCount = fieldCounts[i];
-      FlatProductInputType inputType = inputTypes[i];
-      Object inputObject = lists[i];
-      switch (inputType) {
-      case SCALAR:
-        @SuppressWarnings("unchecked") List<Comparable> list =
-            (List<Comparable>) inputObject;
-        enumerators.add(
-            Linq4j.transform(
-                Linq4j.enumerator(list), FlatLists::of));
-        break;
-      case LIST:
-        @SuppressWarnings("unchecked") List<List<Comparable>> listList =
-            (List<List<Comparable>>) inputObject;
-        enumerators.add(Linq4j.enumerator(listList));
-        break;
-      case MAP:
-        @SuppressWarnings("unchecked") Map<Comparable, Comparable> map =
-            (Map<Comparable, Comparable>) inputObject;
-        Enumerator<Map.Entry<Comparable, Comparable>> enumerator =
-            Linq4j.enumerator(map.entrySet());
+  /** Helper for {@link #flatUncollect}; returns the row-producing function
+   * before the single-output-column unwrapping. */
+  @SuppressWarnings({"rawtypes", "unchecked"})
+  private static Function1<Object, Enumerable<FlatLists.ComparableList<Comparable>>>
+      flatUncollectRows(
+          final int[] passthroughIndices,
+          final int[] collectionIndices,
+          final FlatProductInputType[] inputTypes,
+          final boolean withOrdinality,
+          final int inputFieldCount,
+          final boolean outer,
+          final int[] widths,
+          final int totalElemWidth,
+          final int outputFieldCount) {
+    return inputRowObj -> {
+      // When there is exactly one input field, JavaRowFormat.optimize() always
+      // picks SCALAR format, meaning inputRowObj IS the field value, not a row.
+      final List<Object> inputRow = inputFieldCount == 1
+          ? Collections.singletonList(inputRowObj)
+          : rowToList(inputRowObj);
 
-        Enumerator<List<Comparable>> transformed =
-            Linq4j.transform(enumerator,
-                e -> FlatLists.of(e.getKey(), e.getValue()));
-        enumerators.add(transformed);
-        break;
-      default:
-        break;
+      // For outer (LEFT JOIN) semantics: if every collection is null or empty,
+      // emit one row with pass-through fields preserved and NULL for all
+      // element columns and the ordinality column.
+      if (outer) {
+        boolean allEmpty = true;
+        for (int collectionIndex : collectionIndices) {
+          if (!collectionIsNullOrEmpty(inputRow.get(collectionIndex))) {
+            allEmpty = false;
+            break;
+          }
+        }
+        if (allEmpty) {
+          final Object[] out = new Object[outputFieldCount];
+          int outCol = 0;
+          for (int i : passthroughIndices) {
+            out[outCol++] = inputRow.get(i);
+          }
+          return Linq4j.singletonEnumerable(
+              (FlatLists.ComparableList) FlatLists.of(Arrays.asList(out)));
+        }
       }
-      if (fieldCount < 0) {
-        ++totalFieldCount;
-      } else {
-        totalFieldCount += fieldCount;
+
+      // Build one enumerator per collection, in collectionIndices order.
+      final List<Enumerator<List<Comparable>>> enumerators = new ArrayList<>();
+      for (int q = 0; q < collectionIndices.length; q++) {
+        enumerators.add(
+            collectionEnumerator(inputRow.get(collectionIndices[q]), inputTypes[q]));
       }
+
+      final Enumerable<FlatLists.ComparableList<Comparable>> elemRows =
+          new AbstractEnumerable<ComparableList<Comparable>>() {
+            @Override public Enumerator<ComparableList<Comparable>> enumerator() {
+              return new ZipPaddedEnumerator(
+                  enumerators, widths, totalElemWidth + (withOrdinality ? 1 : 0),
+                  withOrdinality);
+            }
+          };
+
+      // For each element row from elemRows, prepend the pass-through input
+      // fields to produce the final output row. A field in both sets emits
+      // first its raw value and then its element columns.
+      return new AbstractEnumerable<FlatLists.ComparableList<Comparable>>() {
+        @Override public Enumerator<FlatLists.ComparableList<Comparable>> enumerator() {
+          final Enumerator<FlatLists.ComparableList<Comparable>> elemEnum =
+              elemRows.enumerator();
+          return new Enumerator<FlatLists.ComparableList<Comparable>>() {
+            @Override public FlatLists.ComparableList<Comparable> current() {
+              final Object[] out = new Object[outputFieldCount];
+              int outIdx = 0;
+              // Pass-through fields first (in input-index order).
+              for (int i : passthroughIndices) {
+                out[outIdx++] = inputRow.get(i);
+              }
+              // Expanded element columns follow.
+              final List elemRow = elemEnum.current();
+              for (int e = 0; e < totalElemWidth; e++) {
+                out[outIdx++] = elemRow.get(e);
+              }
+              if (withOrdinality) {
+                out[outIdx] = elemRow.get(totalElemWidth);
+              }
+              return (FlatLists.ComparableList) FlatLists.of(Arrays.asList(out));
+            }
+
+            @Override public boolean moveNext() {
+              return elemEnum.moveNext();
+            }
+
+            @Override public void reset() {
+              elemEnum.reset();
+            }
+
+            @Override public void close() {
+              elemEnum.close();
+            }
+          };
+        }
+      };
+    };
+  }
+
+  /** Converts an input row (Object[], List, or scalar) to a {@link List}. */
+  @SuppressWarnings("unchecked")
+  private static List<Object> rowToList(Object rowObj) {
+    if (rowObj instanceof List) {
+      return (List<Object>) rowObj;
+    } else if (rowObj instanceof Object[]) {
+      return Arrays.asList((Object[]) rowObj);
+    } else {
+      return Collections.singletonList(rowObj);
     }
-    if (withOrdinality) {
-      ++totalFieldCount;
+  }
+
+  /** Returns whether {@code collection} is {@code null} or empty. */
+  private static boolean collectionIsNullOrEmpty(@Nullable Object collection) {
+    if (collection == null) {
+      return true;
     }
-    return product(enumerators, totalFieldCount, withOrdinality);
+    if (collection instanceof Collection) {
+      return ((Collection<?>) collection).isEmpty();
+    }
+    if (collection instanceof Map) {
+      return ((Map<?, ?>) collection).isEmpty();
+    }
+    if (collection instanceof Object[]) {
+      return ((Object[]) collection).length == 0;
+    }
+    return false;
+  }
+
+  /** Creates an enumerator over element rows for a single collection field.
+   * Returns an empty enumerator for a {@code null} collection, so under outer
+   * mode the all-empty check above is what produces the NULL-padded row. */
+  @SuppressWarnings({"unchecked", "rawtypes"})
+  private static Enumerator<List<Comparable>> collectionEnumerator(
+      @Nullable Object collection, FlatProductInputType inputType) {
+    if (collection == null) {
+      return Linq4j.emptyEnumerator();
+    }
+    switch (inputType) {
+    case SCALAR:
+      return (Enumerator) Linq4j.transform(
+          Linq4j.enumerator((List) collection), FlatLists::of);
+    case STRUCT:
+      // A struct element kept whole occupies a single output column, like a
+      // scalar element, but its value must be converted to Object[].
+      return (Enumerator) Linq4j.transform(
+          Linq4j.enumerator((List) collection),
+          (Object e) -> FlatLists.ofSingle(structValue(e)));
+    case LIST:
+      final List<List<Comparable>> listColl =
+          collection instanceof Object[]
+              ? (List) Arrays.asList((Object[]) collection)
+              : (List<List<Comparable>>) collection;
+      return Linq4j.enumerator(listColl);
+    case MAP:
+      final Map<Comparable, Comparable> map = (Map<Comparable, Comparable>) collection;
+      return Linq4j.transform(
+          Linq4j.enumerator(map.entrySet()),
+          e -> FlatLists.of(e.getKey(), e.getValue()));
+    default:
+      throw new IllegalArgumentException("Unknown input type: " + inputType);
+    }
   }
 
   public static Object[] array(Object... args) {
@@ -7720,7 +7905,7 @@ public class SqlFunctions {
     JSON_KEYS, JSON_KEYS_AND_VALUES, JSON_VALUES
   }
 
-  /** Type of argument passed into {@link #flatProduct}. */
+  /** Type of argument passed into {@link #flatUncollect}. */
   public enum FlatProductInputType {
     SCALAR, LIST, MAP
   }

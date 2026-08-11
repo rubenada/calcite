@@ -2114,6 +2114,103 @@ class SqlToRelConverterTest extends SqlToRelTestBase {
     sql(sql).withConformance(SqlConformanceEnum.PRESTO).ok();
   }
 
+  /**
+   * Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-7547">[CALCITE-7547]
+   * BIG_QUERY conformance should allow field access on
+   * UNNEST(array_of_struct) AS alias</a>.
+   */
+  @Test void testAliasUnnestArrayPlanWithSingleColumnBigQuery() {
+    final String sql = "select d.deptno, employee.empno\n"
+        + "from dept_nested_expanded as d,\n"
+        + " UNNEST(d.employees) as t(employee)";
+    sql(sql).withConformance(SqlConformanceEnum.BIG_QUERY).ok();
+  }
+
+  /**
+   * Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-7547">[CALCITE-7547]
+   * BIG_QUERY conformance should allow field access on
+   * UNNEST(array_of_struct) AS alias</a>.
+   */
+  @Test void testAliasUnnestArrayPlanWithDoubleColumnBigQuery() {
+    final String sql = "select d.deptno, e, k.empno\n"
+        + "from dept_nested_expanded as d CROSS JOIN\n"
+        + " UNNEST(d.admins, d.employees) as t(e, k)";
+    sql(sql).withConformance(SqlConformanceEnum.BIG_QUERY).ok();
+  }
+
+  /**
+   * Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-7546">[CALCITE-7546]
+   * NullPointerException in SqlToRelConverter for UNNEST(array) AS alias under
+   * conformance with allowAliasUnnestItems=true</a>.
+   */
+  @Test void testAliasUnnestArrayPlanWithoutColumnList() {
+    final String sql = "select d.deptno, e.empno\n"
+        + "from dept_nested_expanded as d,\n"
+        + " UNNEST(d.employees) as e";
+    sql(sql).withConformance(SqlConformanceEnum.PRESTO).ok();
+  }
+
+  @Test void testAliasUnnestScalarArrayPlanWithoutColumnList() {
+    final String sql = "select d.deptno, a\n"
+        + "from dept_nested_expanded as d,\n"
+        + " UNNEST(d.admins) as a";
+    sql(sql).withConformance(SqlConformanceEnum.PRESTO).ok();
+  }
+
+  /**
+   * Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-7546">[CALCITE-7546]
+   * NullPointerException in SqlToRelConverter for UNNEST(array) AS alias under
+   * conformance with allowAliasUnnestItems=true</a>, using the exact array
+   * literal reproduction from the issue.
+   */
+  @Test void testAliasUnnestArrayLiteralPlanWithoutColumnList() {
+    final String sql = "select t\n"
+        + "from UNNEST(ARRAY[1, 2, 3]) as t";
+    sql(sql).withConformance(SqlConformanceEnum.PRESTO).ok();
+  }
+
+  /** Flattening does not change the element type of a collection, so UNNEST
+   * can produce ROW columns in a flattened plan. Here each element is
+   * ROW(EMPNO, ENAME, DETAIL ROW(SKILLS)); UNNEST expands the outer ROW, and
+   * the flattened plan must also expand DETAIL. */
+  @Test void testUnnestNestedRowFlattened() {
+    final String sql = "select d.deptno, e.*\n"
+        + "from dept_nested_expanded as d,\n"
+        + " UNNEST(d.employees) as e";
+    sql(sql).ok();
+  }
+
+  /** As {@link #testUnnestNestedRowFlattened()}, but with PRESTO
+   * conformance UNNEST keeps each element as a single ROW column. */
+  @Test void testAliasUnnestArrayFlattened() {
+    final String sql = "select d.deptno, e\n"
+        + "from dept_nested_expanded as d,\n"
+        + " UNNEST(d.employees) as t(e)";
+    sql(sql).withConformance(SqlConformanceEnum.PRESTO).ok();
+  }
+
+  /** As {@link #testAliasUnnestArrayFlattened()}, with ordinality: the
+   * ordinality column follows all the flattened fields of the ROW. */
+  @Test void testAliasUnnestArrayWithOrdinalityFlattened() {
+    final String sql = "select d.deptno, e, o\n"
+        + "from dept_nested_expanded as d,\n"
+        + " UNNEST(d.employees) with ordinality as t(e, o)";
+    sql(sql).withConformance(SqlConformanceEnum.PRESTO).ok();
+  }
+
+  /** As {@link #testAliasUnnestArrayWithOrdinalityFlattened()}, selecting
+   * fields of the ROW, one of them inside the nested ROW DETAIL. */
+  @Test void testAliasUnnestArrayFieldsFlattened() {
+    final String sql = "select e.empno, e.detail.skills, o\n"
+        + "from dept_nested_expanded as d,\n"
+        + " UNNEST(d.employees) with ordinality as t(e, o)";
+    sql(sql).withConformance(SqlConformanceEnum.PRESTO).ok();
+  }
+
   @Test void testArrayOfRecord() {
     sql("select employees[1].detail.skills[2+3].desc from dept_nested").ok();
   }

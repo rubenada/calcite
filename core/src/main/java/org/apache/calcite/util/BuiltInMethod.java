@@ -329,8 +329,10 @@ public enum BuiltInMethod {
   @SuppressWarnings("deprecation")
   PAIR_LIST_COPY_OF(PairList.Helper.class, "copyOf", Object.class, Object.class,
       Object[].class),
-  FLAT_PRODUCT(SqlFunctions.class, "flatProduct", int[].class, boolean.class,
-      FlatProductInputType[].class),
+  FLAT_UNCOLLECT(SqlFunctions.class, "flatUncollect", int[].class, int[].class,
+      int[].class, FlatProductInputType[].class, boolean.class, int.class,
+      boolean.class),
+  // Calcite no longer uses FLAT_LIST.
   FLAT_LIST(SqlFunctions.class, "flatList"),
   LIST_N(FlatLists.class, "copyOf", Comparable[].class),
   LIST1(FlatLists.class, "ofSingle", Object.class),

@@ -8416,6 +8416,68 @@ class RelToSqlConverterTest {
         withHsqldb().ok(expectedHsqldb);
   }
 
+  /** Tests that a generalized {@link org.apache.calcite.rel.core.Uncollect}
+   * (pass-through fields) converts to SQL via {@code LATERAL UNNEST}. */
+  @Test void testGeneralizedUncollect() {
+    final Function<RelBuilder, RelNode> relFn = b -> b
+        .scan("EMP")
+        .project(b.field("DEPTNO"),
+            b.call(SqlStdOperatorTable.ARRAY_VALUE_CONSTRUCTOR,
+                b.field("ENAME")))
+        .uncollect(ImmutableBitSet.of(0), ImmutableBitSet.of(1), false, true, false)
+        .build();
+    final String expected = "SELECT \"$cor0\".\"DEPTNO\", \"t10\".\"$f1\"\n"
+        + "FROM (SELECT \"DEPTNO\", ARRAY[\"ENAME\"] AS \"$f1\"\n"
+        + "FROM \"scott\".\"EMP\") AS \"$cor0\",\n"
+        + "LATERAL UNNEST((SELECT \"$cor0\".\"$f1\"\n"
+        + "FROM (VALUES (0)) AS \"t\" (\"ZERO\"))) AS \"t10\" (\"$f1\")";
+    relFn(relFn).ok(expected);
+  }
+
+  /** As {@link #testGeneralizedUncollect()}, with outer (LEFT JOIN)
+   * semantics. */
+  @Test void testGeneralizedUncollectOuter() {
+    final Function<RelBuilder, RelNode> relFn = b -> b
+        .scan("EMP")
+        .project(b.field("DEPTNO"),
+            b.call(SqlStdOperatorTable.ARRAY_VALUE_CONSTRUCTOR,
+                b.field("ENAME")))
+        .uncollect(ImmutableBitSet.of(0), ImmutableBitSet.of(1), false, true, true)
+        .build();
+    final String expected = "SELECT \"$cor0\".\"DEPTNO\", \"t10\".\"$f1\"\n"
+        + "FROM (SELECT \"DEPTNO\", ARRAY[\"ENAME\"] AS \"$f1\"\n"
+        + "FROM \"scott\".\"EMP\") AS \"$cor0\"\n"
+        + "LEFT JOIN LATERAL UNNEST((SELECT \"$cor0\".\"$f1\"\n"
+        + "FROM (VALUES (0)) AS \"t\" (\"ZERO\"))) AS \"t10\" (\"$f1\") ON TRUE";
+    relFn(relFn).ok(expected);
+  }
+
+  /** As {@link #testGeneralizedUncollect()}, with ORDINALITY, using PRESTO conformance. */
+  @Test void testGeneralizedUncollectUnexpandedStruct() {
+    final Function<RelBuilder, RelNode> relFn = b -> b
+        .scan("EMP")
+        .project(b.field("DEPTNO"),
+            b.call(SqlStdOperatorTable.ARRAY_VALUE_CONSTRUCTOR,
+                b.call(SqlStdOperatorTable.ROW, b.field("EMPNO"),
+                    b.field("ENAME"))))
+        .uncollect(ImmutableBitSet.of(0), ImmutableBitSet.of(1), true, false, false)
+        .build();
+    final String expected = "SELECT \"$cor0\".\"DEPTNO\", \"t10\".\"$f1\","
+        + " \"t10\".\"ORDINALITY\"\n"
+        + "FROM (SELECT \"DEPTNO\", ARRAY[ROW(\"EMPNO\", \"ENAME\")] AS \"$f1\"\n"
+        + "FROM \"scott\".\"EMP\") AS \"$cor0\",\n"
+        + "LATERAL UNNEST((SELECT \"$cor0\".\"$f1\"\n"
+        + "FROM (VALUES (0)) AS \"t\" (\"ZERO\"))) WITH ORDINALITY"
+        + " AS \"t10\" (\"$f1\", \"ORDINALITY\")";
+    relFn(relFn).ok(expected);
+    // Validation fails if the alias list does not have exactly 2 columns
+    sql(expected)
+        .schema(CalciteAssert.SchemaSpec.SCOTT_WITH_TEMPORAL)
+        .parserConfig(
+            SqlParser.config().withConformance(SqlConformanceEnum.PRESTO))
+        .exec();
+  }
+
   @Test void testWithinGroup1() {
     final String query = "select \"product_class_id\", collect(\"net_weight\") "
         + "within group (order by \"net_weight\" desc) "
@@ -12462,6 +12524,171 @@ class RelToSqlConverterTest {
         + "FROM \"SCOTT\".\"EMP\" AS \"EMP\"";
 
     sql(sql).schema(CalciteAssert.SchemaSpec.JDBC_SCOTT).ok(expected);
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-7440">[CALCITE-7440]
+   * RelToSqlConverter throws NPE (variable $cor1 not found) for correlated
+   * projection after semi-join rewrites.</a>. */
+  @Test void testPostgresqlRoundTripCorrelatedProjectWithSemiJoinRules() {
+    final String query = "WITH product_keys AS (\n"
+        + "  SELECT p.\"product_id\",\n"
+        + "         (SELECT MAX(p3.\"product_id\")\n"
+        + "          FROM \"foodmart\".\"product\" p3\n"
+        + "          WHERE p3.\"product_id\" = p.\"product_id\") AS \"mx\"\n"
+        + "  FROM \"foodmart\".\"product\" p\n"
+        + ")\n"
+        + "SELECT DISTINCT pk.\"product_id\"\n"
+        + "FROM product_keys pk\n"
+        + "LEFT JOIN \"foodmart\".\"product\" p2 USING (\"product_id\")\n"
+        + "WHERE pk.\"product_id\" IN (\n"
+        + "  SELECT p4.\"product_id\"\n"
+        + "  FROM \"foodmart\".\"product\" p4\n"
+        + ")";
+
+    final RuleSet rules =
+        RuleSets.ofList(CoreRules.FILTER_SUB_QUERY_TO_MARK_CORRELATE,
+            CoreRules.PROJECT_SUB_QUERY_TO_MARK_CORRELATE,
+            CoreRules.MARK_TO_SEMI_OR_ANTI_JOIN_RULE,
+            CoreRules.SEMI_JOIN_JOIN_TRANSPOSE);
+
+    final String generated = sql(query).withPostgresql().optimize(rules, null).exec();
+    sql(generated).withPostgresql().exec();
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-7439">[CALCITE-7439]
+   * RelToSqlConverter emits ambiguous GROUP BY after LEFT JOIN USING with
+   * semi-join rewrite.</a>. */
+  @Test void testPostgresqlRoundTripDistinctLeftJoinInSubqueryWithSemiJoinRules() {
+    final String generated =
+        postgresqlDistinctJoinSql("\"product_id\"", "LEFT", "USING (\"product_id\")");
+    assertPostgresqlSqlValid(generated);
+  }
+
+  @Test void testDistinctRightJoinUsing() {
+    final String generated =
+        postgresqlDistinctJoinSql("\"product_id\"", "RIGHT", "USING (\"product_id\")");
+    assertThat(
+        generated, isLinux("SELECT \"product1\".\"product_id\"\n"
+        + "FROM (SELECT \"$cor0\".\"product_id\", \"t1\".\"EXPR$0\" AS \"mx\"\n"
+        + "FROM \"foodmart\".\"product\" AS \"$cor0\"\n"
+        + "LEFT JOIN LATERAL (SELECT MAX(\"product_id\") AS \"EXPR$0\"\n"
+        + "FROM \"foodmart\".\"product\"\n"
+        + "WHERE \"product_id\" = \"$cor0\".\"product_id\") AS \"t1\" ON TRUE) AS \"t2\"\n"
+        + "RIGHT JOIN \"foodmart\".\"product\" AS \"product1\""
+        + " ON \"t2\".\"product_id\" = \"product1\".\"product_id\"\n"
+        + "WHERE EXISTS (SELECT 1\n"
+        + "FROM (SELECT \"product_id\"\n"
+        + "FROM \"foodmart\".\"product\") AS \"t3\"\n"
+        + "WHERE \"t2\".\"product_id\" = \"t3\".\"product_id\")\n"
+        + "GROUP BY \"product1\".\"product_id\""));
+    assertPostgresqlSqlValid(generated);
+  }
+
+  @Test void testDistinctFullJoinUsing() {
+    final String generated =
+        postgresqlDistinctJoinSql("\"product_id\"", "FULL", "USING (\"product_id\")");
+    assertThat(generated,
+        isLinux("SELECT COALESCE(\"t2\".\"product_id\","
+            + " \"product1\".\"product_id\") AS \"product_id\"\n"
+            + "FROM (SELECT \"$cor0\".\"product_id\", \"t1\".\"EXPR$0\" AS \"mx\"\n"
+            + "FROM \"foodmart\".\"product\" AS \"$cor0\"\n"
+            + "LEFT JOIN LATERAL (SELECT MAX(\"product_id\") AS \"EXPR$0\"\n"
+            + "FROM \"foodmart\".\"product\"\n"
+            + "WHERE \"product_id\" = \"$cor0\".\"product_id\") AS \"t1\" ON TRUE) AS \"t2\"\n"
+            + "FULL JOIN \"foodmart\".\"product\" AS \"product1\""
+            + " ON \"t2\".\"product_id\" = \"product1\".\"product_id\"\n"
+            + "WHERE EXISTS (SELECT 1\n"
+            + "FROM (SELECT \"product_id\"\n"
+            + "FROM \"foodmart\".\"product\") AS \"t3\"\n"
+            + "WHERE \"t2\".\"product_id\" = \"t3\".\"product_id\")\n"
+            + "GROUP BY COALESCE(\"t2\".\"product_id\","
+            + " \"product1\".\"product_id\")"));
+    assertPostgresqlSqlValid(generated);
+  }
+
+  @Test void testDistinctFullJoinOnKeepsSelectedSide() {
+    final String condition = "ON pk.\"product_id\" = p2.\"product_id\"";
+    final String generated =
+        postgresqlDistinctJoinSql("pk.\"product_id\"", "FULL", condition);
+    assertThat(
+        generated, isLinux("SELECT \"t2\".\"product_id\"\n"
+        + "FROM (SELECT \"$cor0\".\"product_id\", \"t1\".\"EXPR$0\" AS \"mx\"\n"
+        + "FROM \"foodmart\".\"product\" AS \"$cor0\"\n"
+        + "LEFT JOIN LATERAL (SELECT MAX(\"product_id\") AS \"EXPR$0\"\n"
+        + "FROM \"foodmart\".\"product\"\n"
+        + "WHERE \"product_id\" = \"$cor0\".\"product_id\") AS \"t1\" ON TRUE) AS \"t2\"\n"
+        + "FULL JOIN \"foodmart\".\"product\" AS \"product1\""
+        + " ON \"t2\".\"product_id\" = \"product1\".\"product_id\"\n"
+        + "WHERE EXISTS (SELECT 1\n"
+        + "FROM (SELECT \"product_id\"\n"
+        + "FROM \"foodmart\".\"product\") AS \"t3\"\n"
+        + "WHERE \"t2\".\"product_id\" = \"t3\".\"product_id\")\n"
+        + "GROUP BY \"t2\".\"product_id\""));
+    assertPostgresqlSqlValid(generated);
+  }
+
+  @Test void testDistinctOverSemiJoinAndCorrelate() {
+    final Function<RelBuilder, RelNode> relFn = b -> {
+      final Holder<RexCorrelVariable> v = Holder.empty();
+      b.values(new String[]{"id"}, 1)
+          .variable(v::set);
+      b.values(new String[]{"id"}, 1)
+          .filter(
+              b.equals(b.field("id"),
+                  b.getRexBuilder().makeFieldAccess(v.get(), 0)));
+      final RexNode correlateId = b.field(2, 0, 0);
+      b.correlate(JoinRelType.INNER, v.get().id, correlateId);
+      b.values(new String[]{"id"}, 1);
+      final RexNode leftId = b.field(2, 0, 0);
+      return b.join(JoinRelType.SEMI,
+              b.equals(leftId, b.field(2, 1, 0)))
+          .project(leftId)
+          .distinct()
+          .build();
+    };
+    final String generated = relFn(relFn).exec();
+    assertThat(
+        generated, isLinux("SELECT \"$cor0\".\"id\"\n"
+        + "FROM (VALUES (1)) AS \"$cor0\" (\"id\"),\n"
+        + "LATERAL (SELECT *\n"
+        + "FROM (VALUES (1)) AS \"t0\" (\"id\")\n"
+        + "WHERE \"id\" = \"$cor0\".\"id\") AS \"t1\"\n"
+        + "WHERE EXISTS (SELECT 1\n"
+        + "FROM (VALUES (1)) AS \"t2\" (\"id\")\n"
+        + "WHERE \"$cor0\".\"id\" = \"t2\".\"id\")\n"
+        + "GROUP BY \"$cor0\".\"id\""));
+    assertPostgresqlSqlValid(generated);
+  }
+
+  @Test void testDistinctOverNestedJoin() {
+    final Function<RelBuilder, RelNode> relFn = b -> {
+      b.scan("EMP");
+      b.scan("EMP");
+      b.join(JoinRelType.INNER,
+          b.equals(b.field(2, 0, "EMPNO"), b.field(2, 1, "EMPNO")));
+      b.scan("EMP");
+      b.join(JoinRelType.INNER,
+          b.equals(b.field(2, 0, 0), b.field(2, 1, "EMPNO")));
+      b.scan("DEPT");
+      final RexNode firstDeptNo = b.field(2, 0, 7);
+      return b.join(JoinRelType.SEMI,
+              b.equals(b.field(2, 0, 7), b.field(2, 1, "DEPTNO")))
+          .project(firstDeptNo)
+          .distinct()
+          .build();
+    };
+    relFn(relFn).ok("SELECT \"EMP\".\"DEPTNO\"\n"
+        + "FROM \"scott\".\"EMP\"\n"
+        + "INNER JOIN \"scott\".\"EMP\" AS \"EMP0\""
+        + " ON \"EMP\".\"EMPNO\" = \"EMP0\".\"EMPNO\"\n"
+        + "INNER JOIN \"scott\".\"EMP\" AS \"EMP1\""
+        + " ON \"EMP\".\"EMPNO\" = \"EMP1\".\"EMPNO\"\n"
+        + "WHERE EXISTS (SELECT 1\n"
+        + "FROM \"scott\".\"DEPT\"\n"
+        + "WHERE \"EMP\".\"DEPTNO\" = \"DEPT\".\"DEPTNO\")\n"
+        + "GROUP BY \"EMP\".\"DEPTNO\"");
   }
 
   @Test void testNotBetween() {

@@ -44,6 +44,8 @@ import static java.util.Objects.requireNonNull;
 /** Convert representations of a projected Unnest that use LogicalCorrelate into
  * simple Unnest representations.
  *
+ * @see CorrelateUncollectMergeRule
+ *
  * <p>Original plan:
  * LogicalProject // only uses rightmost columns of correlate, outerProject
  *   LogicalCorrelate(correlation=[$cor0], joinType=[inner], requiredColumns=[{...}])
@@ -97,6 +99,11 @@ public class UnnestDecorrelateRule extends RelRule<UnnestDecorrelateRule.Config>
   @Override public void onMatch(RelOptRuleCall call) {
     Project outerProject = call.rel(0);
     Correlate cor = call.rel(1);
+    if (cor.getJoinType() != JoinRelType.INNER) {
+      // Removing the correlate is only sound for INNER.
+      // A LEFT correlate must first be converted by CorrelateUncollectMergeRule.Config.OUTER.
+      return;
+    }
     CorrelationId corId = cor.getCorrelationId();
 
     RelNode left = call.rel(2);

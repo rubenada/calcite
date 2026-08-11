@@ -17,6 +17,7 @@
 package org.apache.calcite.rel.mutable;
 
 import org.apache.calcite.rel.type.RelDataType;
+import org.apache.calcite.util.ImmutableBitSet;
 
 import org.checkerframework.checker.nullness.qual.Nullable;
 
@@ -25,15 +26,26 @@ import java.util.Objects;
 /** Mutable equivalent of {@link org.apache.calcite.rel.core.Uncollect}. */
 public class MutableUncollect extends MutableSingleRel {
   public final boolean withOrdinality;
+  public final ImmutableBitSet passthroughFieldIndices;
+  public final ImmutableBitSet collectionFieldIndices;
+  public final boolean expandStructFields;
+  public final boolean isOuter;
 
   private MutableUncollect(RelDataType rowType,
-      MutableRel input, boolean withOrdinality) {
+      MutableRel input, boolean withOrdinality,
+      ImmutableBitSet passthroughFieldIndices,
+      ImmutableBitSet collectionFieldIndices,
+      boolean expandStructFields, boolean isOuter) {
     super(MutableRelType.UNCOLLECT, rowType, input);
     this.withOrdinality = withOrdinality;
+    this.passthroughFieldIndices = passthroughFieldIndices;
+    this.collectionFieldIndices = collectionFieldIndices;
+    this.expandStructFields = expandStructFields;
+    this.isOuter = isOuter;
   }
 
   /**
-   * Creates a MutableUncollect.
+   * Creates a MutableUncollect that unnests every input field.
    *
    * @param rowType         Row type
    * @param input           Input relational expression
@@ -42,26 +54,69 @@ public class MutableUncollect extends MutableSingleRel {
    */
   public static MutableUncollect of(RelDataType rowType,
       MutableRel input, boolean withOrdinality) {
-    return new MutableUncollect(rowType, input, withOrdinality);
+    return of(rowType, input, withOrdinality, ImmutableBitSet.of(),
+        ImmutableBitSet.range(input.rowType.getFieldCount()), true, false);
+  }
+
+  /**
+   * Creates a MutableUncollect.
+   *
+   * @param rowType                 Row type
+   * @param input                   Input relational expression
+   * @param withOrdinality          Whether the output contains an extra
+   *                                {@code ORDINALITY} column
+   * @param passthroughFieldIndices 0-based indices of the input fields to pass
+   *                                through unchanged
+   * @param collectionFieldIndices  0-based indices of the input fields whose
+   *                                values are collections to unnest
+   * @param expandStructFields      If true, a collection whose element type
+   *                                is a struct produces one output column per
+   *                                struct field; if false, a single column
+   *                                typed as the whole element
+   * @param isOuter                 If true, preserves input rows with
+   *                                null/empty collections (LEFT JOIN); if
+   *                                false, drops them (INNER)
+   */
+  public static MutableUncollect of(RelDataType rowType,
+      MutableRel input, boolean withOrdinality,
+      ImmutableBitSet passthroughFieldIndices,
+      ImmutableBitSet collectionFieldIndices,
+      boolean expandStructFields, boolean isOuter) {
+    return new MutableUncollect(rowType, input, withOrdinality,
+        passthroughFieldIndices, collectionFieldIndices, expandStructFields,
+        isOuter);
   }
 
   @Override public boolean equals(@Nullable Object obj) {
     return obj == this
         || obj instanceof MutableUncollect
         && withOrdinality == ((MutableUncollect) obj).withOrdinality
+        && passthroughFieldIndices.equals(
+            ((MutableUncollect) obj).passthroughFieldIndices)
+        && collectionFieldIndices.equals(
+            ((MutableUncollect) obj).collectionFieldIndices)
+        && expandStructFields == ((MutableUncollect) obj).expandStructFields
+        && isOuter == ((MutableUncollect) obj).isOuter
         && input.equals(((MutableUncollect) obj).input);
   }
 
   @Override public int hashCode() {
-    return Objects.hash(input, withOrdinality);
+    return Objects.hash(input, withOrdinality, passthroughFieldIndices,
+        collectionFieldIndices, expandStructFields, isOuter);
   }
 
   @Override public StringBuilder digest(StringBuilder buf) {
-    return buf.append("Uncollect(withOrdinality: ")
-        .append(withOrdinality).append(")");
+    return buf.append("Uncollect(withOrdinality: ").append(withOrdinality)
+        .append(", passthrough: ").append(passthroughFieldIndices)
+        .append(", collectionFields: ").append(collectionFieldIndices)
+        .append(", expandStructFields: ").append(expandStructFields)
+        .append(", isOuter: ").append(isOuter)
+        .append(")");
   }
 
   @Override public MutableRel clone() {
-    return MutableUncollect.of(rowType, input.clone(), withOrdinality);
+    return MutableUncollect.of(rowType, input.clone(), withOrdinality,
+        passthroughFieldIndices, collectionFieldIndices, expandStructFields,
+        isOuter);
   }
 }
