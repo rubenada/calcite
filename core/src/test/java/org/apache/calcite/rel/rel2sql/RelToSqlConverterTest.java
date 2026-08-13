@@ -12443,4 +12443,80 @@ class RelToSqlConverterTest {
     sql(query).withLibrary(SqlLibrary.HIVE).withHive().ok(expectedHive);
     sql(query).withLibrary(SqlLibrary.SPARK).withSpark().ok(expectedSpark);
   }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-7505">[CALCITE-7505]
+   * RelToSqlConverter fails to alias outer relation for correlated sub-queries in Filter</a>. */
+  @Test void testExistsSubQueryAliasConflict() {
+    final String sql =
+        "select deptno, sum(sal) as total\n"
+            + "from emp t\n"
+            + "where exists (\n"
+            + "  select * from dept t0\n"
+            + "  where deptno = t.deptno\n"
+            + ")\n"
+            + "group by deptno";
+
+
+    sql(sql)
+        .schema(CalciteAssert.SchemaSpec.JDBC_SCOTT)
+        .ok(
+            "SELECT \"DEPTNO\", SUM(\"SAL\") AS \"TOTAL\"\n"
+                + "FROM \"SCOTT\".\"EMP\" AS \"EMP\"\n"
+                + "WHERE EXISTS (SELECT *\n"
+                + "FROM \"SCOTT\".\"DEPT\"\n"
+                + "WHERE \"DEPTNO\" = \"EMP\".\"DEPTNO\")\n"
+                + "GROUP BY \"DEPTNO\"");
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-7505">[CALCITE-7505]
+   * RelToSqlConverter fails to alias outer relation for correlated sub-queries in Filter</a>. */
+  @Test void testExistsSubQueryOverUnion() {
+    final String sql =
+        "SELECT *\n"
+            + "FROM (\n"
+            + "  SELECT deptno FROM emp\n"
+            + "  UNION ALL\n"
+            + "  SELECT deptno FROM dept\n"
+            + ") u\n"
+            + "WHERE EXISTS (\n"
+            + "  SELECT 1\n"
+            + "  FROM emp e\n"
+            + "  WHERE e.deptno = u.deptno\n"
+            + ")";
+
+    sql(sql)
+        .schema(CalciteAssert.SchemaSpec.JDBC_SCOTT)
+        .ok(
+            "SELECT *\n"
+                + "FROM (SELECT \"DEPTNO\"\n"
+                + "FROM \"SCOTT\".\"EMP\"\n"
+                + "UNION ALL\n"
+                + "SELECT \"DEPTNO\"\n"
+                + "FROM \"SCOTT\".\"DEPT\") AS \"t1\"\n"
+                + "WHERE EXISTS (SELECT *\n"
+                + "FROM \"SCOTT\".\"EMP\"\n"
+                + "WHERE \"DEPTNO\" = \"t1\".\"DEPTNO\")");
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-6578">[CALCITE-6578]
+   * RelToSql throws exception when unparse TIMESTAMPDIFF function</a>. */
+  @Test public void testTimestampDiff() {
+    String query = "SELECT {fn TIMESTAMPDIFF(SQL_TSI_YEAR,"
+        + "TIMESTAMP '2016-01-01 00:00:00', TIMESTAMP '2017-01-01 00:00:00')}";
+    String expected = "SELECT CAST((TIMESTAMP '2017-01-01 00:00:00' -"
+        + " TIMESTAMP '2016-01-01 00:00:00') AS INTEGER)\n"
+        + "FROM (VALUES (0)) AS \"t\" (\"ZERO\")";
+    sql(query).ok(expected);
+  }
+
+  /** Test case for TIMESTAMPDIFF with DATE arguments. */
+  @Test void testTimestampdiff() {
+    String query = "select TIMESTAMPDIFF(day,date '2029-05-06',date '2029-05-07')";
+    String expected = "SELECT CAST((DATE '2029-05-07' - DATE '2029-05-06') AS INTEGER)\n"
+        + "FROM (VALUES (0)) AS \"t\" (\"ZERO\")";
+    sql(query).ok(expected);
+  }
 }
