@@ -112,6 +112,7 @@ import org.checkerframework.checker.nullness.qual.Nullable;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -127,8 +128,10 @@ import static org.apache.calcite.test.Matchers.isLinux;
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.CoreMatchers.notNullValue;
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasToString;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -259,6 +262,164 @@ class RelToSqlConverterTest {
     String query = "SELECT CAST(0.1E0 AS DOUBLE), CAST(0.1E0 AS REAL), CAST(0.1E0 AS DOUBLE)";
     String expected = "SELECT 1E-1, 1E-1, 1E-1";
     sql(query).withMysql().ok(expected);
+  }
+
+  /** Creates a relational expression that projects literals of many types. */
+  private static RelNode projectOfLiterals() {
+    final RelBuilder b = relBuilder();
+    final RelDataTypeFactory typeFactory = b.getTypeFactory();
+    final RexBuilder rexBuilder = b.getRexBuilder();
+    return b
+        .scan("EMP")
+        .project(
+            rexBuilder.makeLiteral(1,
+                typeFactory.createSqlType(SqlTypeName.TINYINT)),
+            rexBuilder.makeLiteral(1,
+                typeFactory.createSqlType(SqlTypeName.SMALLINT)),
+            rexBuilder.makeLiteral(1,
+                typeFactory.createSqlType(SqlTypeName.INTEGER)),
+            rexBuilder.makeLiteral(1,
+                typeFactory.createSqlType(SqlTypeName.BIGINT)),
+            rexBuilder.makeLiteral(new BigDecimal("1.50"),
+                typeFactory.createSqlType(SqlTypeName.DECIMAL, 10, 2)),
+            rexBuilder.makeLiteral(0.5,
+                typeFactory.createSqlType(SqlTypeName.REAL)),
+            rexBuilder.makeLiteral(0.5,
+                typeFactory.createSqlType(SqlTypeName.DOUBLE)),
+            // makeCast folds the cast into a literal with type VARCHAR(10)
+            rexBuilder.makeCast(
+                typeFactory.createSqlType(SqlTypeName.VARCHAR, 10),
+                rexBuilder.makeLiteral("abc")),
+            rexBuilder.makeLiteral("abc",
+                typeFactory.createSqlType(SqlTypeName.CHAR, 3)),
+            rexBuilder.makeNullLiteral(
+                typeFactory.createSqlType(SqlTypeName.INTEGER)),
+            b.literal(true))
+        .build();
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-5987">[CALCITE-5987]
+   * SqlImplementor loses type information for literals</a>.  */
+  @Test void testPreserveLiteralTypes() {
+    final RelNode root = projectOfLiterals();
+    final SqlDialect dialect = DatabaseProduct.CALCITE.getDialect();
+    // Without the option, every literal except the NULL loses its type;
+    // visit(Project) casts NULL literals regardless of the option
+    final String expected = "SELECT 1 AS \"$f0\", 1 AS \"$f1\", 1 AS \"$f2\","
+        + " 1 AS \"$f3\", 1.50 AS \"$f4\", 5E-1 AS \"$f5\", 5E-1 AS \"$f6\","
+        + " 'abc' AS \"$f7\", 'abc' AS \"$f8\", CAST(NULL AS INTEGER) AS \"$f9\","
+        + " TRUE AS \"$f10\"\n"
+        + "FROM \"scott\".\"EMP\"";
+    assertThat(toSql(root, dialect), isLinux(expected));
+    // With the option, literals whose SQL text parses to a different type
+    // use a cast
+    final String expectedPreserved = "SELECT"
+        + " CAST(1 AS TINYINT) AS \"$f0\","
+        + " CAST(1 AS SMALLINT) AS \"$f1\","
+        + " 1 AS \"$f2\","
+        + " CAST(1 AS BIGINT) AS \"$f3\","
+        + " CAST(1.50 AS DECIMAL(10, 2)) AS \"$f4\","
+        + " CAST(5E-1 AS REAL) AS \"$f5\","
+        + " 5E-1 AS \"$f6\","
+        + " CAST('abc' AS VARCHAR(10) CHARACTER SET \"ISO-8859-1\") AS \"$f7\","
+        + " 'abc' AS \"$f8\","
+        + " CAST(NULL AS INTEGER) AS \"$f9\","
+        + " TRUE AS \"$f10\"\n"
+        + "FROM \"scott\".\"EMP\"";
+    assertThat(toSqlPreservingLiteralTypes(root, dialect),
+        isLinux(expectedPreserved));
+  }
+
+  /** As {@link #testPreserveLiteralTypes()}, but for literals in a VALUES
+   * clause. */
+  @Test void testPreserveLiteralTypesValues() {
+    final RelBuilder b = relBuilder();
+    final RelDataTypeFactory typeFactory = b.getTypeFactory();
+    final RexBuilder rexBuilder = b.getRexBuilder();
+    final RelDataType tinyint = typeFactory.createSqlType(SqlTypeName.TINYINT);
+    final RelDataType varchar5 =
+        typeFactory.createSqlType(SqlTypeName.VARCHAR, 5);
+    final RelDataType rowType = typeFactory.builder()
+        .add("a", tinyint)
+        .add("b", varchar5)
+        .build();
+    final RelNode root = b
+        .values(
+            ImmutableList.of(
+                ImmutableList.of(rexBuilder.makeLiteral(1, tinyint),
+                    (RexLiteral) rexBuilder.makeCast(varchar5,
+                        rexBuilder.makeLiteral("x"))),
+                ImmutableList.of(rexBuilder.makeLiteral(2, tinyint),
+                    (RexLiteral) rexBuilder.makeCast(varchar5,
+                        rexBuilder.makeLiteral("y")))),
+            rowType)
+        .build();
+    final SqlDialect dialect = DatabaseProduct.CALCITE.getDialect();
+    final String expectedPreserved = "SELECT *\n"
+        + "FROM (VALUES"
+        + " (CAST(1 AS TINYINT),"
+        + " CAST('x' AS VARCHAR(5) CHARACTER SET \"ISO-8859-1\")),\n"
+        + "(CAST(2 AS TINYINT),"
+        + " CAST('y' AS VARCHAR(5) CHARACTER SET \"ISO-8859-1\")))"
+        + " AS \"t\" (\"a\", \"b\")";
+    assertThat(toSqlPreservingLiteralTypes(root, dialect),
+        isLinux(expectedPreserved));
+  }
+
+  /** Test case for <a href="https://issues.apache.org/jira/browse/CALCITE-7731">[CALCITE-7731]
+   * Bound plain-notation expansion of DECIMAL literals to prevent parse-time
+   * OutOfMemoryError</a>. A DECIMAL literal whose plain-notation expansion would
+   * exceed the configured bound must not be converted to SQL text. */
+  @Test void testDecimalLiteralPlainNotationBoundInRelToSql() {
+    final RelBuilder b = relBuilder();
+    final RexBuilder rexBuilder = b.getRexBuilder();
+    // A literal with 20,000 digits comfortably exceeds the default 10,000
+    // digit bound, without requiring a multi-gigabyte allocation to build.
+    final BigDecimal outOfBound = new BigDecimal(BigInteger.TEN.pow(20_000));
+    final RelNode root = b
+        .scan("EMP")
+        .project(rexBuilder.makeExactLiteral(outOfBound))
+        .build();
+    final SqlDialect dialect = DatabaseProduct.CALCITE.getDialect();
+    final IllegalStateException e =
+        assertThrows(IllegalStateException.class, () -> toSql(root, dialect));
+    assertThat(e.getMessage(),
+        containsString("exceeds the configured plain-notation bound"));
+  }
+
+  /** Parses a SQL query and converts it to a relational expression. */
+  private static RelNode sqlToRel(String sql, SchemaPlus defaultSchema,
+      SqlParser.Config parserConfig, Set<SqlLibrary> librarySet,
+      SqlToRelConverter.Config config, SqlDialect dialect,
+      SqlRexConvertletTable convertletTable) throws Exception {
+    final Planner planner =
+        getPlanner(null, parserConfig, defaultSchema, config, librarySet,
+            dialect.getTypeSystem(), convertletTable);
+    final SqlNode parse = planner.parse(sql);
+    final SqlNode validate = planner.validate(parse);
+    return planner.rel(validate).project();
+  }
+
+  /** As {@link #testPreserveLiteralTypes()}, but the type of a FETCH or
+   * OFFSET literal carries no information, so those literals are never
+   * cast, whatever their type. */
+  @Test void testPreserveLiteralTypesFetchOffset() {
+    final RelBuilder b = relBuilder();
+    final RelDataTypeFactory typeFactory = b.getTypeFactory();
+    final RexBuilder rexBuilder = b.getRexBuilder();
+    final RelDataType bigint = typeFactory.createSqlType(SqlTypeName.BIGINT);
+    final RelNode root =
+        LogicalSort.create(b.scan("EMP").build(), RelCollations.EMPTY,
+            rexBuilder.makeLiteral(2, bigint),
+            rexBuilder.makeLiteral(3, bigint));
+    final SqlDialect dialect = DatabaseProduct.CALCITE.getDialect();
+    final String expectedPreserved = "SELECT *\n"
+        + "FROM \"scott\".\"EMP\"\n"
+        + "OFFSET 2 ROWS\n"
+        + "FETCH NEXT 3 ROWS ONLY";
+    assertThat(toSqlPreservingLiteralTypes(root, dialect),
+        isLinux(expectedPreserved));
   }
 
   /** Test case for
