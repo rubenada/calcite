@@ -2689,6 +2689,18 @@ public class SqlOperatorTest {
     f.checkNull("concat(null, null)");
     f.checkFails("^concat('a', 'b', 'c')^", INVALID_ARGUMENTS_NUMBER, false);
     f.checkFails("^concat('a')^", INVALID_ARGUMENTS_NUMBER, false);
+    // Test case for [CALCITE-7063]
+    // Result type inferred for CONCAT_FUNCTION is incorrect for BINARY arguments
+    f.checkString("concat(x'0a', x'0b')", "0a0b", "VARBINARY(2) NOT NULL");
+    f.checkString("concat(x'0a', cast(null as varbinary))", "0a",
+        "VARBINARY NOT NULL");
+    f.checkNull("concat(cast(null as varbinary), cast(null as varbinary))");
+    f.checkFails("^concat('a', x'0a')^",
+        "Cannot apply 'CONCAT' to arguments of type "
+            + "'CONCAT\\(<CHAR\\(1\\)>, <BINARY\\(1\\)>\\)'\\. Supported "
+            + "form\\(s\\): 'CONCAT\\(<CHARACTER>, <CHARACTER>\\)'\n"
+            + "'CONCAT\\(<BINARY>, <BINARY>\\)'",
+        false);
   }
 
   /** Test case for
@@ -11709,7 +11721,8 @@ public class SqlOperatorTest {
       f.checkFails("^" + fn + "('aabbcc', x'aa')^",
           "Cannot apply '" + fn + "' to arguments of type "
               + "'" + fn + "\\(<CHAR\\(6\\)>, <BINARY\\(1\\)>\\)'\\. Supported "
-              + "form\\(s\\): '" + fn + "\\(<STRING>, <STRING>\\)'",
+              + "form\\(s\\): '" + fn + "\\(<CHARACTER>, <CHARACTER>\\)'\\n"
+              + "'" + fn + "\\(<BINARY>, <BINARY>\\)'",
           false);
       f.checkNull(fn + "(null, null)");
       f.checkNull(fn + "('12345', null)");
@@ -11749,7 +11762,8 @@ public class SqlOperatorTest {
       f.checkFails("^" + fn + "('aabbcc', x'aa')^",
           "Cannot apply '" + fn + "' to arguments of type "
               + "'" + fn + "\\(<CHAR\\(6\\)>, <BINARY\\(1\\)>\\)'\\. Supported "
-              + "form\\(s\\): '" + fn + "\\(<STRING>, <STRING>\\)'",
+              + "form\\(s\\): '" + fn + "\\(<CHARACTER>, <CHARACTER>\\)'\\s*"
+              + "'" + fn + "\\(<BINARY>, <BINARY>\\)'",
           false);
       f.checkNull(fn + "(null, null)");
       f.checkNull(fn + "('12345', null)");
