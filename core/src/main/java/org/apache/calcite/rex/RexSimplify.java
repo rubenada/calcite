@@ -632,6 +632,52 @@ public class RexSimplify {
     return simplifyMixedWildcards(builder.toString(), escape);
   }
 
+  /** Returns whether two nodes are the same comparison, considering the
+   * symmetry of comparison operators: "{@code a = b}" is equivalent to
+   * "{@code b = a}", and "{@code a < b}" is equivalent to
+   * "{@code b > a}".
+   *
+   * <p>This allows digest-based rewrites such as the absorption law
+   * ("{@code a AND (a OR b) => a}") to recognize comparison terms that
+   * differ only in the order of their operands.
+   * See <a href="https://issues.apache.org/jira/browse/CALCITE-739">[CALCITE-739]
+   * Extend RexUtil.pullFactors to recognize additional common factors</a>.
+   */
+  private static boolean equivalentComparison(RexNode a, RexNode b) {
+    if (a.equals(b)) {
+      return true;
+    }
+    if (!(a instanceof RexCall) || !(b instanceof RexCall)) {
+      return false;
+    }
+    final RexCall callA = (RexCall) a;
+    final RexCall callB = (RexCall) b;
+    final SqlKind kindA = callA.getKind();
+    // Comparison operators are the only operators whose semantics is
+    // preserved when operands are reversed and the operator is reversed
+    // (for example, "a < b" becomes "b > a").
+    if (!SqlKind.COMPARISON.contains(kindA)
+        || kindA.reverse() != callB.getKind()
+        || callA.getOperands().size() != 2
+        || callB.getOperands().size() != 2) {
+      return false;
+    }
+    return callA.getOperands().get(0).equals(callB.getOperands().get(1))
+        && callA.getOperands().get(1).equals(callB.getOperands().get(0));
+  }
+
+  /** Returns whether {@code nodes} contains a node that is the same
+   * comparison as {@code target}; see {@link #equivalentComparison}. */
+  private static boolean containsEquivalentComparison(List<RexNode> nodes,
+      RexNode target) {
+    for (RexNode node : nodes) {
+      if (equivalentComparison(node, target)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   // e must be a comparison (=, >, >=, <, <=, !=)
   private RexNode simplifyComparison(RexCall e, RexUnknownAs unknownAs) {
     //noinspection unchecked
@@ -2356,6 +2402,42 @@ public class RexSimplify {
       }
     }
     return RexUtil.composeDisjunction(rexBuilder, terms);
+  }
+
+  /**
+   * Applies the absorption law to a list of terms, removing any composite term
+   * that is absorbed by a sibling term.
+   *
+   * <p>When {@code compositeKind} is {@link SqlKind#OR}, removes any
+   * {@code (a OR b)} term whose disjunctions contain a sibling {@code a}, so
+   * {@code a AND (a OR b) => a}. When it is {@link SqlKind#AND}, removes any
+   * {@code (a AND b)} term whose conjunctions contain a sibling {@code a}, so
+   * {@code a OR (a AND b) => a}.
+   *
+   * <p>The absorbing sibling {@code a} must be deterministic; otherwise its two
+   * occurrences might evaluate differently and the rewrite would not be
+   * equivalence-preserving.
+   */
+  private static void absorb(List<RexNode> terms, SqlKind compositeKind) {
+    if (terms.size() > MAX_TERMS_FOR_ABSORPTION) {
+      return;
+    }
+    for (int i = 0; i < terms.size(); i++) {
+      final RexNode term = terms.get(i);
+      if (term.getKind() == compositeKind) {
+        final List<RexNode> components = compositeKind == SqlKind.OR
+            ? RelOptUtil.disjunctions(term)
+            : RelOptUtil.conjunctions(term);
+        for (RexNode other : terms) {
+          if (other != term && RexUtil.isDeterministic(other)
+              && containsEquivalentComparison(components, other)) {
+            terms.remove(i);
+            i--;
+            break;
+          }
+        }
+      }
+    }
   }
 
   private Pair<Comparable, RuntimeException> evaluate(RexNode e, Map<RexNode, Comparable> map) {
