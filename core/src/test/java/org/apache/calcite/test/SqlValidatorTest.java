@@ -7121,6 +7121,30 @@ public class SqlValidatorTest extends SqlValidatorTestCase {
   }
 
   /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-7761">[CALCITE-7761]
+   * Preserve OFFSET and FETCH when rewriting outer ORDER BY</a>. */
+  @Test void testOrderByPreservesFetchAddedByRewrite() {
+    final SqlValidatorFixture fixture = fixture()
+        .withFactory(f -> f.withValidator(RownumRewritingValidator::new));
+
+    fixture.withSql("select empno from emp where rownum <= 5 order by empno")
+        .rewritesTo("SELECT *\n"
+            + "FROM (SELECT `EMPNO`\n"
+            + "FROM `EMP`\n"
+            + "FETCH NEXT 5 ROWS ONLY)\n"
+            + "ORDER BY `EXPR$0`.`EMPNO`");
+
+    fixture.withSql("with e as (select deptno as empno from dept)\n"
+        + "select empno from e where rownum <= 5 order by empno")
+        .rewritesTo("SELECT *\n"
+            + "FROM (WITH `E` AS (SELECT `DEPTNO` AS `EMPNO`\n"
+            + "FROM `DEPT`) SELECT `EMPNO`\n"
+            + "FROM `E`\n"
+            + "FETCH NEXT 5 ROWS ONLY)\n"
+            + "ORDER BY `EXPR$0`.`EMPNO`");
+  }
+
+  /** Test case for
    * <a href="https://issues.apache.org/jira/browse/CALCITE-633">[CALCITE-633]
    * WITH ... ORDER BY cannot find table</a>. */
   @Test void testWithOrder() {
@@ -14238,5 +14262,86 @@ public class SqlValidatorTest extends SqlValidatorTestCase {
         return sqlIdentifier;
       }
     }
+  }
+
+  /** Validator that simulates a rewrite performed by an external application.
+   * Calcite's parser does not produce a {@link SqlSelect} with FETCH and a null
+   * order list, but an external rewrite such as replacing a ROWNUM predicate
+   * with FETCH can produce that tree shape. */
+  private static class RownumRewritingValidator extends SqlValidatorImpl {
+    RownumRewritingValidator(SqlOperatorTable opTab,
+        SqlValidatorCatalogReader catalogReader,
+        RelDataTypeFactory typeFactory, Config config) {
+      super(opTab, catalogReader, typeFactory, config);
+    }
+
+    @Override protected SqlNode performUnconditionalRewrites(SqlNode node,
+        boolean underFrom) {
+      node = super.performUnconditionalRewrites(node, underFrom);
+      if (node instanceof SqlSelect) {
+        final SqlSelect select = (SqlSelect) node;
+        final SqlNode where = select.getWhere();
+        if (where instanceof SqlCall
+            && where.getKind() == SqlKind.LESS_THAN_OR_EQUAL) {
+          final SqlCall call = (SqlCall) where;
+          final SqlNode left = call.operand(0);
+          if (left instanceof SqlIdentifier
+              && ((SqlIdentifier) left).isSimple()
+              && ((SqlIdentifier) left).getSimple().equalsIgnoreCase("ROWNUM")) {
+            select.setWhere(null);
+            select.setFetch(call.operand(1));
+          }
+        }
+      }
+      return node;
+    }
+  }
+
+  /** Test case for <a href="https://issues.apache.org/jira/browse/CALCITE-7582">[CALCITE-7582]
+   * Type validation errors should use SQL type names</a>. */
+  @Test public void testErrorMessage() {
+    sql("SELECT ^(DATE '2020-02-02', DATE '2021-01-01') CONTAINS TIME '10:00:00'^")
+        .fails(".*Cannot apply 'CONTAINS' to arguments of type '<ROW\\(DATE EXPR\\$0, "
+              + "DATE EXPR\\$1\\)> "
+              + "CONTAINS <TIME\\(0\\)>'\\. Supported form\\(s\\): '\\(<DT>, <DT>\\) "
+              + "CONTAINS \\(<DT>, <DT>\\)'\\n"
+              + "'\\(<DT>, <DT>\\) CONTAINS \\(<DT>, <INTERVAL>\\)'\n"
+              + "'\\(<DT>, <INTERVAL>\\) CONTAINS \\(<DT>, <DT>\\)'\n"
+              + "'\\(<DT>, <INTERVAL>\\) CONTAINS \\(<DT>, <INTERVAL>\\)'\n"
+              + "'\\(<DT>, <DT>\\) CONTAINS <DT>'\n"
+              + "'\\(<DT>, <INTERVAL>\\) CONTAINS <DT>'\\n"
+              + "Where 'DT' is one of 'DATE', 'TIME', or 'TIMESTAMP', "
+              + "the same for all arguments\\.");
+    sql("SELECT ^MAP['x', ARRAY[3]] = "
+        + "MAP[CAST(ROW(1, 2) AS ROW(X INT, Y BIGINT)), ROW(ARRAY['a'])]^")
+        .fails("Cannot apply '=' to arguments of type '<MAP<CHAR\\(1\\), INTEGER ARRAY>> = "
+            + "<MAP<ROW\\(INTEGER X, BIGINT Y\\), ROW\\(CHAR\\(1\\) ARRAY EXPR\\$0\\)>>'\\. "
+            + "Supported form\\(s\\): '<COMPARABLE_TYPE> = <COMPARABLE_TYPE>'");
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-7583">[CALCITE-7583]
+   * UNNEST with multiple array arguments returns wrong result</a>.
+   *
+   * <p>When UNNEST is given multiple collection arguments, zip (positional)
+   * semantics pad shorter collections with NULL, so all output columns must be
+   * nullable even when the element types of the input arrays are not nullable. */
+  @Test void testUnnestMultiArgNullability() {
+    // Single-arg UNNEST: element type is NOT NULL, result column is NOT NULL.
+    sql("select * from unnest(array[1, 2])")
+        .type("RecordType(INTEGER NOT NULL EXPR$0) NOT NULL");
+    // Multi-arg UNNEST: result columns are nullable (padded with NULL when lengths differ).
+    sql("select * from unnest(array[1, 2], array[3, 4])")
+        .type("RecordType(INTEGER EXPR$0, INTEGER EXPR$1) NOT NULL");
+    // Ordinality column itself is always NOT NULL.
+    sql("select * from unnest(array[1, 2], array[3, 4]) with ordinality")
+        .type("RecordType(INTEGER EXPR$0, INTEGER EXPR$1,"
+            + " INTEGER NOT NULL ORDINALITY) NOT NULL");
+    // Different element types: both result columns are nullable.
+    sql("select * from unnest(array['a', 'b'], array[1, 2])")
+        .type("RecordType(CHAR(1) EXPR$0, INTEGER EXPR$1) NOT NULL");
+    // Struct array + scalar array: all result columns (including struct fields) are nullable.
+    sql("select * from unnest(array[(1, 'a'), (2, 'b')], array[10, 20]) as t(p, q, r)")
+        .type("RecordType(INTEGER P, CHAR(1) Q, INTEGER R) NOT NULL");
   }
 }
