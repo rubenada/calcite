@@ -510,6 +510,31 @@ public final class CalciteSystemProperty<T> {
       stringProperty("calcite.model.baseDirectory", "");
 
   /**
+   * Comma-separated list of URL protocols other than {@code file} that the
+   * file adapter may dereference in a table {@code url} operand (for example
+   * {@code -Dcalcite.file.remote.protocols.allowed=http,https}). Empty by default:
+   * only {@code file:} sources are dereferenced.
+   */
+  public static final CalciteSystemProperty<String> FILE_REMOTE_PROTOCOLS_ALLOWED =
+      stringProperty("calcite.file.remote.protocols.allowed", "");
+
+  /**
+   * Comma-separated list of hostnames that the file adapter may dereference in
+   * a table {@code url} operand once its protocol has been allowed via
+   * {@link #FILE_REMOTE_PROTOCOLS_ALLOWED} (for example
+   * {@code -Dcalcite.file.remote.hosts.allowed=data.example.com,ftp.example.com}).
+   *
+   * <p>Empty by default: an allowed protocol may reach any host. When set,
+   * the URL's host must match one of the listed hostnames (case-insensitive,
+   * exact match, no substring or suffix matching, so that {@code example.com}
+   * does not admit {@code bad-example.com}). Additive to
+   * {@link #FILE_REMOTE_PROTOCOLS_ALLOWED}: a host on the list still needs its
+   * protocol on the protocol allowlist.
+   */
+  public static final CalciteSystemProperty<String> FILE_REMOTE_HOSTS_ALLOWED =
+      stringProperty("calcite.file.remote.hosts.allowed", "");
+
+  /**
    * Maximum number of decimal digits that the plain-notation expansion of a {@code DECIMAL}
    * literal may contain.
    *
