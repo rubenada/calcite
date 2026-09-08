@@ -533,6 +533,48 @@ public final class CalciteSystemProperty<T> {
       stringProperty("calcite.model.baseDirectory", "");
 
   /**
+   * Restricts the URL protocols other than {@code file} that the file adapter
+   * may dereference in a table {@code url} operand.
+   *
+   * <p>Fetching a remote URL named in a {@code url} operand is the file
+   * adapter's documented purpose, so the default is {@code "*"}: any protocol
+   * with a registered JVM handler is dereferenced. An operator who does not
+   * want the adapter to make network requests can turn that off, either wholly
+   * or down to a chosen set of schemes:
+   *
+   * <ul>
+   * <li>{@code "*"} (default) &mdash; any protocol;
+   * <li>a comma-separated list, for example
+   *     {@code -Dcalcite.file.remote.protocols.allowed=http,https} &mdash;
+   *     only those protocols (case-insensitive), plus {@code file};
+   * <li>empty, {@code -Dcalcite.file.remote.protocols.allowed=} &mdash; no
+   *     remote protocol at all; only {@code file:} sources are dereferenced.
+   * </ul>
+   */
+  public static final CalciteSystemProperty<String> FILE_REMOTE_PROTOCOLS_ALLOWED =
+      stringProperty("calcite.file.remote.protocols.allowed", "*");
+
+  /**
+   * Restricts the hostnames that the file adapter may dereference in a table
+   * {@code url} operand, once the protocol has passed {@link #FILE_REMOTE_PROTOCOLS_ALLOWED}.
+   *
+   * <p>Same shape as that property: {@code "*"} (the default) admits any host,
+   * a comma-separated list admits only those hostnames (case-insensitive,
+   * exact match, no substring or suffix matching, so that {@code example.com}
+   * does not admit {@code bad-example.com}), and an empty value admits none.
+   * Both properties must pass, so a host on this list still needs its protocol
+   * on the protocol list.
+   *
+   * <p><b>Limitation.</b> The host is checked on the URL named in the operand,
+   * not on each hop of a redirect chain: the underlying HTTP clients follow
+   * redirects, so a listed host that serves an open redirect can still lead the
+   * adapter to an unlisted one. Treat this list as a way to narrow where the
+   * adapter is pointed, not as an egress control; enforce that in the network.
+   */
+  public static final CalciteSystemProperty<String> FILE_REMOTE_HOSTS_ALLOWED =
+      stringProperty("calcite.file.remote.hosts.allowed", "*");
+
+  /**
    * Whether the Kafka adapter forwards the {@code consumer.params} model
    * operand to the Kafka client without filtering it.
    *

@@ -27,6 +27,13 @@ limitations under the License.
 The file adapter is able to read files in a variety of formats,
 and can also read files over various protocols, such as HTTP.
 
+Because a table's `url` operand may name a remote URL, whoever writes the model
+decides which hosts the adapter's JVM connects to, and the response body becomes
+rows. Deploy the adapter accordingly: if the model can come from a principal you
+do not trust with that reach, either leave the adapter out or restrict it with
+the system properties described in
+[Restricting remote fetches](#restricting-remote-fetches).
+
 For example if you define:
 
 * States - https://en.wikipedia.org/wiki/List_of_states_and_territories_of_the_United_States
@@ -343,6 +350,47 @@ sqlline> select distinct deptno from depts;
 +--------+
 3 rows selected (0.985 seconds)
 {% endhighlight %}
+
+## Restricting remote fetches
+
+Fetching the URL named in a table `url` operand is the adapter's purpose, so by
+default it dereferences any protocol for which the JVM has a handler, at any
+host. An operator who wants the adapter's local-file half without its network half
+can narrow that with two JVM system properties:
+
+| Property | Restricts |
+| --- | --- |
+| `calcite.file.remote.protocols.allowed` | which protocols other than `file` may be dereferenced |
+| `calcite.file.remote.hosts.allowed` | which hostnames those protocols may name |
+
+Each takes `*` (the default, no restriction), a comma-separated list, or an
+empty value, which admits nothing. A remote operand must pass both, and `file:`
+sources are never affected. For example, to let the adapter reach two hosts over
+HTTPS and nothing else:
+
+{% highlight bash %}
+java -Dcalcite.file.remote.protocols.allowed=https \
+     -Dcalcite.file.remote.hosts.allowed=data.example.com,files.example.com \
+     ...
+{% endhighlight %}
+
+and to stop it making network requests entirely:
+
+{% highlight bash %}
+java -Dcalcite.file.remote.protocols.allowed= ...
+{% endhighlight %}
+
+An operand these properties do not admit fails with
+`IllegalArgumentException`. Hostnames are compared exactly, ignoring case, so
+`example.com` admits neither `data.example.com` nor `bad-example.com`. Both
+properties are read once when Calcite's configuration class is loaded, so set
+them on the command line; a query author cannot change them.
+
+The host list is not an egress control. It is checked against the URL in the
+operand, and the HTTP clients underneath the adapter follow redirects, so an
+admitted host that serves an open redirect can still lead the adapter to one
+that is not on the list. Where the destination genuinely matters, enforce it in
+the network.
 
 ## Future improvements
 

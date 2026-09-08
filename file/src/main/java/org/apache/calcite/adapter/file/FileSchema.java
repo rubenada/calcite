@@ -16,6 +16,7 @@
  */
 package org.apache.calcite.adapter.file;
 
+import org.apache.calcite.config.CalciteSystemProperty;
 import org.apache.calcite.schema.SchemaPlus;
 import org.apache.calcite.schema.Table;
 import org.apache.calcite.schema.impl.AbstractSchema;
@@ -37,6 +38,14 @@ import java.util.Map;
 /**
  * Schema mapped onto a set of URLs / HTML tables. Each table in the schema
  * is an HTML table on a URL.
+ *
+ * <p>A table {@code url} operand may name a remote URL, which this adapter
+ * fetches and returns as rows; that is what the adapter is for. The fetch is
+ * therefore directed by whoever supplies the model, so an operator who does
+ * not want it can restrict or disable it with the
+ * {@link CalciteSystemProperty#FILE_REMOTE_PROTOCOLS_ALLOWED} and
+ * {@link CalciteSystemProperty#FILE_REMOTE_HOSTS_ALLOWED} system properties.
+ * Both default to {@code "*"}, i.e. any protocol, any host.
  */
 class FileSchema extends AbstractSchema {
   private final ImmutableList<Map<String, Object>> tables;
@@ -119,11 +128,75 @@ class FileSchema extends AbstractSchema {
     return builder.build();
   }
 
+  /** Checks that a model-supplied source may be dereferenced by this adapter.
+   *
+   * <p>A {@code file} source always may. A remote one may unless the operator
+   * has narrowed {@link CalciteSystemProperty#FILE_REMOTE_PROTOCOLS_ALLOWED} or
+   * {@link CalciteSystemProperty#FILE_REMOTE_HOSTS_ALLOWED} away from their
+   * default {@code "*"}.
+   *
+   * @throws IllegalArgumentException if the operator's configuration does not
+   *     admit this source's protocol or host */
+  static void checkSourceProtocolAllowed(Source source) {
+    checkSourceProtocolAllowed(source,
+        CalciteSystemProperty.FILE_REMOTE_PROTOCOLS_ALLOWED.value(),
+        CalciteSystemProperty.FILE_REMOTE_HOSTS_ALLOWED.value());
+  }
+
+  static void checkSourceProtocolAllowed(Source source, String allowedProtocols,
+      String allowedHosts) {
+    final String protocol = source.protocol();
+    if ("file".equals(protocol)) {
+      return;
+    }
+    if (!admits(allowedProtocols, protocol)) {
+      throw new IllegalArgumentException("Remote URL protocol '" + protocol
+          + "' is not allowed in file adapter table operands; the system"
+          + " property \"calcite.file.remote.protocols.allowed\" is set to \""
+          + allowedProtocols + "\"");
+    }
+    if (isWildcard(allowedHosts)) {
+      return;
+    }
+    final String host = source.url().getHost();
+    if (!admits(allowedHosts, host)) {
+      throw new IllegalArgumentException("Remote URL host '" + host
+          + "' is not allowed in file adapter table operands; the system"
+          + " property \"calcite.file.remote.hosts.allowed\" is set to \""
+          + allowedHosts + "\"");
+    }
+  }
+
+  /** Whether a comma-separated list is the wildcard {@code "*"}. */
+  private static boolean isWildcard(String list) {
+    for (String s : list.split(",")) {
+      if (s.trim().equals("*")) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Whether a comma-separated list admits {@code value}: either the list
+   * contains the wildcard {@code "*"}, or one of its entries equals
+   * {@code value}, ignoring case. An empty list admits nothing. */
+  private static boolean admits(String list, @Nullable String value) {
+    for (String s : list.split(",")) {
+      final String entry = s.trim();
+      if (entry.equals("*")
+          || !entry.isEmpty() && entry.equalsIgnoreCase(value)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   private boolean addTable(ImmutableMap.Builder<String, Table> builder,
       Map<String, Object> tableDef) {
     final String tableName = (String) tableDef.get("name");
     final String url = (String) tableDef.get("url");
     final Source source0 = Sources.url(url);
+    checkSourceProtocolAllowed(source0);
     final Source source;
     if (baseDirectory == null) {
       source = source0;

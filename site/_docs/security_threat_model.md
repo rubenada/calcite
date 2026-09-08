@@ -60,8 +60,11 @@ h2's concern, not Calcite's.
 
 * the host running Calcite: no code execution, and no file access beyond
   what an adapter is configured to perform;
-* the internal network reachable from that host: no attacker-directed
-  outbound requests.
+* the internal network reachable from that host: no outbound request that
+  an adapter was not configured to make. Where the operator has deployed an
+  adapter whose purpose is to fetch a URL named in its operands, the model
+  author directs those fetches; see
+  [Not a vulnerability](#not-a-vulnerability).
 
 ## Inputs
 
@@ -76,9 +79,9 @@ carve-out below. A report that reaches a sink not covered here is a model gap
 | `tableFactory` and function classes | `model` | a class loaded through a Calcite table or function SPI | Surprising vs unsurprising class loading (P1) |
 | `dataSource`, `jdbcDriver` | connection property or `model` | a class loaded through a standard-Java SPI (`javax.sql.DataSource`, `java.sql.Driver`) | Surprising vs unsurprising class loading (P1); the host it then dials is P3 |
 | `fun` | connection property | selects built-in function libraries by name | no class loading; ordinary SQL semantics under P1–P4 |
-| `model` — inline JSON, a `file:` path, or a URL | connection property | schema/table factories and adapter operands | P1 (factories via SPI), P2 (local-file operands), P3 (a URL model, or a URL-fetching adapter). Reading the model URI's own bytes is the property's documented semantics; the principal who set the connection property authorises that read. |
+| `model` — inline JSON, a `file:` path, or a URL | connection property | schema/table factories and adapter operands | P1 (factories via SPI), P2 (local-file operands), P3 (network destinations Calcite chooses on its own). Reading the model URI's own bytes, and fetching a URL that a deployed URL-fetching adapter's operands name, are those features' documented semantics; the principal who set the connection property authorises both. |
 | A serialized RelNode plan (`RelJson`) — types and operators | any path that reconstructs a plan from attacker input | type and operator class resolution | Surprising vs unsurprising class loading (P1) |
-| Adapter operands — e.g. a file/CSV/JSON path, or the os-adapter | `model` or SQL | the adapter's configured resource | P2 for a configured local path (opt-in ⇒ not a vulnerability); the os-adapter is opt-in (not a vulnerability) |
+| Adapter operands — e.g. a file/CSV/JSON path or `url`, or the os-adapter | `model` or SQL | the adapter's configured resource | P2 for a configured local path (opt-in ⇒ not a vulnerability); a `url` operand on a URL-fetching adapter is that adapter's purpose (opt-in ⇒ not a vulnerability, narrowable by system property); the os-adapter is opt-in (not a vulnerability) |
 
 ## Security properties
 
@@ -89,11 +92,16 @@ carve-out below. A report that reaches a sink not covered here is a model gap
   an accessed static field runs. Exception: the os-adapter.
 * **P2: no incidental file access.** Neither connecting nor running
   SQL may read or create a file, except where a file-oriented adapter or
-  table function reads the local path it was explicitly configured with. The
-  carve-out covers local filesystem paths only; a file adapter that fetches a
-  URL (`http://`, `https://`) is making a network request and falls under P3.
-* **P3: no server-side request forgery.** Neither connecting nor
-  running SQL may open a network connection to an attacker-chosen host.
+  table function reads the path or URL it was explicitly configured with.
+* **P3: no server-side request forgery.** Neither connecting nor running SQL
+  may open a network connection to a host that Calcite was not configured to
+  reach. Forgery means Calcite choosing the destination itself, or deriving it
+  from input that is not meant to name one — not an operator deploying an
+  adapter whose documented job is to fetch the URL its operands name. Where
+  that adapter is the file adapter, an operator who does not want those
+  fetches narrows or disables them with
+  `calcite.file.remote.protocols.allowed` and
+  `calcite.file.remote.hosts.allowed`.
 * **P4: no escape from the configured schemas.** Neither connecting nor
   running SQL may read data outside the schemas the connection exposes. A query
   that reaches another schema, a file, or a catalog that the connection's root
@@ -107,9 +115,12 @@ carve-out below. A report that reaches a sink not covered here is a model gap
    class loading runs the static initializer before any type check.
 2. **Arbitrary file read or write** that no explicitly-configured file
    adapter was asked to perform.
-3. **Server-side request forgery**, forcing Calcite to connect to a
-   host the attacker chooses (internal services, cloud metadata endpoints,
-   port scans).
+3. **Server-side request forgery**, forcing Calcite to connect to a host the
+   attacker chooses (internal services, cloud metadata endpoints, port scans)
+   through an input that is not meant to name a network destination. An
+   operand whose documented purpose *is* to name one, on an adapter the
+   operator deployed, is not this (see
+   [Not a vulnerability](#not-a-vulnerability)).
 4. **Reading beyond the configured schemas**, reaching another schema,
    a file, or a catalog that the connection's root schema does not make
    visible.
@@ -120,6 +131,36 @@ carve-out below. A report that reaches a sink not covered here is a model gap
   must add it on purpose.
 * A file, CSV, or JSON adapter reading the local path it was configured
   with. Opt-in, by the same reasoning as the os-adapter.
+* The file adapter dereferencing a remote URL (`http`, `https`, `ftp`, `jar`,
+  ...) named in a table `url` operand, and returning its bytes as rows. That is
+  what the adapter is for: the
+  [file adapter documentation]({{ site.baseurl }}/docs/file_adapter.html)
+  builds its worked example on scraping an HTTP page, so an operator who
+  deploys the adapter is deploying a URL fetcher. The fetch is directed by
+  whoever writes the model, exactly as the configured local path is, so it is
+  opt-in by the same reasoning as the os-adapter, and reporting it as SSRF is
+  reporting the feature.
+
+  This holds however narrow the fetch's consequences look. Pointing the adapter
+  at an internal service or a cloud metadata endpoint and reading the response
+  as rows is inside the carve-out; a host that lets an untrusted principal
+  supply a `model` has already granted the capability in
+  [Attacker and trust boundary](#attacker-and-trust-boundary), and the
+  remedy is not to deploy the file adapter there (see
+  [Downstream responsibilities](#downstream-responsibilities)).
+
+  Two JVM system properties let an operator narrow or switch the behaviour off
+  without removing the adapter: `calcite.file.remote.protocols.allowed` and
+  `calcite.file.remote.hosts.allowed`. Both default to `*`, which is the
+  behaviour of every release up to and including 1.42.0; a comma-separated list
+  restricts the adapter to those schemes or hostnames, and an empty value
+  leaves only `file:`. A query author cannot set either one. They are
+  defence-in-depth for operators who want the adapter's local-file half without
+  its network half — not the boundary that makes the fetch legitimate, which is
+  the opt-in above. Neither is an egress control: the host list is checked on
+  the URL in the operand, and the HTTP clients underneath follow redirects, so
+  an allowed host serving an open redirect still reaches an unlisted one.
+  Enforce egress in the network.
 * The Spark engine and its side effects: a local `JavaSparkContext`, a
   local HTTP class server that serves compiled query classes, and setting
   the `spark.repl.class.uri` JVM system property. The `spark` connection
@@ -161,12 +202,27 @@ vulnerability.
   across schemas exposed on one connection are the embedder's to prevent (see
   [Not a vulnerability](#not-a-vulnerability)).
 * **Adapter selection.** Add the os-adapter and the file, CSV, or JSON adapters
-  only where the query author is trusted to reach what they expose.
+  only where the query author is trusted to reach what they expose. For the file
+  adapter that includes the network its host can reach, since a table `url`
+  operand may name a remote URL; where that is not wanted, either leave the
+  adapter out or set `calcite.file.remote.protocols.allowed` to an empty value.
+* **Egress.** Calcite does not police where a configured fetch ends up. An
+  adapter that follows redirects can be led past any hostname list Calcite
+  checks, so restrict outbound traffic in the network, not in the query engine.
 * **Classpath.** The operator owns the classpath. Calcite gates class loading by
   SPI; which classes are present is the operator's trust decision.
 * **What a `model` points at.** A third-party driver or service a `model`
   references is configured and patched by the operator; its behavior past the
   connection boundary is out of this model.
+
+### Example modules
+
+Modules under `example/` (`example-csv`, `example-function`) are teaching
+artifacts referenced from the [tutorial]({{ site.baseurl }}/docs/tutorial.html),
+not production adapters. They are held to a lower bar than the rest of Calcite:
+a finding whose only reachable path is through an `example/` module, with no
+matching path in a production module, is a documentation issue rather than a
+vulnerability.
 
 ## Surprising vs unsurprising class loading
 
@@ -260,10 +316,13 @@ Every security report against Calcite resolves to exactly one of:
   it need not be chained to end-to-end RCE.
 * **Not a vulnerability (by design)** — matches an item in
   [Not a vulnerability](#not-a-vulnerability): the os-adapter, an opt-in
-  file/CSV/JSON adapter reading its configured path, third-party driver or
-  pushed-down SQL behavior past the connection, or cross-tenant reads that
-  follow from the embedder's schema exposure. Close with a pointer to this
-  model.
+  file/CSV/JSON adapter reading the path or `url` it was configured with,
+  third-party driver or pushed-down SQL behavior past the connection, or
+  cross-tenant reads that follow from the embedder's schema exposure. Close with
+  a pointer to this model. A report that the file adapter fetches the remote URL
+  named in a table `url` operand lands here, in any release, whatever the
+  fetched host; the `calcite.file.remote.*` properties are hardening for
+  operators, not the boundary that makes the fetch legitimate.
 * **Out of model** — requires a capability the attacker does not have (changing
   a JVM system property or the classpath), or lands in a layer this model
   assigns to the host (network transport, TLS, authentication, authorization).
