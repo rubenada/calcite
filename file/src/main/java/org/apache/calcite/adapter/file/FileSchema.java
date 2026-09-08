@@ -16,6 +16,7 @@
  */
 package org.apache.calcite.adapter.file;
 
+import org.apache.calcite.config.CalciteSystemProperty;
 import org.apache.calcite.schema.SchemaPlus;
 import org.apache.calcite.schema.Table;
 import org.apache.calcite.schema.impl.AbstractSchema;
@@ -37,6 +38,12 @@ import java.util.Map;
 /**
  * Schema mapped onto a set of URLs / HTML tables. Each table in the schema
  * is an HTML table on a URL.
+ *
+ * <p>By default, only {@code file} sources are dereferenced. Table operands
+ * naming remote URLs make the host fetch an arbitrary, model-supplied URL and
+ * return the response as rows (potential server-side request forgery), so
+ * remote protocols must be explicitly enabled by the operator via the
+ * {@link CalciteSystemProperty#FILE_REMOTE_PROTOCOLS_ALLOWED} system property.
  */
 class FileSchema extends AbstractSchema {
   private final ImmutableList<Map<String, Object>> tables;
@@ -119,11 +126,62 @@ class FileSchema extends AbstractSchema {
     return builder.build();
   }
 
+  /** Checks that the protocol of a model-supplied source may be dereferenced
+   * by this adapter: {@code file} always, any remote protocol only when the
+   * operator has listed it in
+   * {@link CalciteSystemProperty#FILE_REMOTE_PROTOCOLS_ALLOWED}, and (if the
+   * host allowlist {@link CalciteSystemProperty#FILE_REMOTE_HOSTS_ALLOWED} is
+   * set) only when the URL's host is on that list. */
+  static void checkSourceProtocolAllowed(Source source) {
+    checkSourceProtocolAllowed(source,
+        CalciteSystemProperty.FILE_REMOTE_PROTOCOLS_ALLOWED.value(),
+        CalciteSystemProperty.FILE_REMOTE_HOSTS_ALLOWED.value());
+  }
+
+  static void checkSourceProtocolAllowed(Source source, String allowedProtocols) {
+    checkSourceProtocolAllowed(source, allowedProtocols, "");
+  }
+
+  static void checkSourceProtocolAllowed(Source source, String allowedProtocols,
+      String allowedHosts) {
+    final String protocol = source.protocol();
+    if ("file".equals(protocol)) {
+      return;
+    }
+    boolean protocolMatch = false;
+    for (String p : allowedProtocols.split(",")) {
+      if (protocol.equalsIgnoreCase(p.trim())) {
+        protocolMatch = true;
+        break;
+      }
+    }
+    if (!protocolMatch) {
+      throw new IllegalArgumentException("Remote URL protocol '" + protocol
+          + "' is not allowed in file adapter table operands (only 'file' is"
+          + " allowed by default); to allow it, add it to the system property"
+          + " \"calcite.file.remote.protocols.allowed\"");
+    }
+    if (allowedHosts.trim().isEmpty()) {
+      return;
+    }
+    final String host = source.url().getHost();
+    for (String h : allowedHosts.split(",")) {
+      final String allowed = h.trim();
+      if (!allowed.isEmpty() && allowed.equalsIgnoreCase(host)) {
+        return;
+      }
+    }
+    throw new IllegalArgumentException("Remote URL host '" + host
+        + "' is not on the file adapter host allowlist; to allow it, add it"
+        + " to the system property \"calcite.file.remote.hosts.allowed\"");
+  }
+
   private boolean addTable(ImmutableMap.Builder<String, Table> builder,
       Map<String, Object> tableDef) {
     final String tableName = (String) tableDef.get("name");
     final String url = (String) tableDef.get("url");
     final Source source0 = Sources.url(url);
+    checkSourceProtocolAllowed(source0);
     final Source source;
     if (baseDirectory == null) {
       source = source0;

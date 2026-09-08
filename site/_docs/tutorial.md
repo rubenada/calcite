@@ -51,6 +51,15 @@ several important concepts:
 * advanced implementation of Table, using TranslatableTable, that translates
   to relational operators using planner rules.
 
+<div class="alert alert-info" role="alert">
+  <strong>Note.</strong> Calcite-example-CSV is pedagogical code. It is
+  intentionally minimal and does not carry the security hardening that ships
+  in the production
+  <a href="{{ site.baseurl }}/docs/adapter.html#file-adapter">file adapter</a>.
+  Do not embed it in a service that exposes its <code>model</code> or JDBC connection
+  properties to an untrusted query author; use <code>calcite-file</code> instead.
+</div>
+
 ## Download and build
 
 You need Java (version 8, 9 or 10) and Git.
