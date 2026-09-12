@@ -236,6 +236,10 @@ public class MssqlSqlDialect extends SqlDialect {
     return false;
   }
 
+  @Override public boolean supportsGroupByLiteral() {
+    return false;
+  }
+
   @Override public boolean supportsGroupByWithRollup() {
     return true;
   }
