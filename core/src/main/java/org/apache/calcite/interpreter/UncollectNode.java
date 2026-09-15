@@ -50,12 +50,16 @@ public class UncollectNode extends AbstractSingleNode<Uncollect> {
             }
           }
         } else if (value instanceof Map) {
-          Map map = (Map) value;
-          for (Object key : map.keySet()) {
+          Map<?, ?> map = (Map<?, ?>) value;
+          if (map.isEmpty() && rel.isOuter) {
+            sink.send(Row.of(new Object[width]));
+            continue;
+          }
+          for (Map.Entry<?, ?> entry : map.entrySet()) {
             if (rel.withOrdinality) {
-              sink.send(Row.of(key, map.get(key), i++));
+              sink.send(Row.of(entry.getKey(), entry.getValue(), i++));
             } else {
-              sink.send(Row.of(key, map.get(key)));
+              sink.send(Row.of(entry.getKey(), entry.getValue()));
             }
           }
         } else {
