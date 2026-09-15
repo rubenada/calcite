@@ -65,7 +65,8 @@ class GeodeTableOqlValidationTest {
         GeodeTable.checkOqlIdentifier("a b"));
     assertThrows(IllegalArgumentException.class, () ->
         GeodeTable.checkOqlIdentifier(""));
-    assertThrows(IllegalArgumentException.class, () ->
+    // Null is a caller bug and surfaces as NullPointerException, not as a shape violation
+    assertThrows(NullPointerException.class, () ->
         GeodeTable.checkOqlIdentifier(null));
   }
 

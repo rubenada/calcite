@@ -110,11 +110,14 @@ public class GeodeTable extends AbstractQueryableTable implements TranslatableTa
    * that do not look like a plain identifier/path are rejected rather than
    * escaped.
    *
+   * <p>The value must be non-null; a null argument is a caller bug and
+   * surfaces as {@link NullPointerException}.
+   *
    * @throws IllegalArgumentException if the value does not match
    */
-  private static String checkOql(Pattern pattern, String kind,
-      @Nullable String value) {
-    if (value == null || !pattern.matcher(value).matches()) {
+  private static String checkOql(Pattern pattern, String kind, String value) {
+    requireNonNull(value, kind);
+    if (!pattern.matcher(value).matches()) {
       throw new IllegalArgumentException("Cannot use " + kind + " '" + value
           + "' in a Geode OQL query; only plain identifiers are supported");
     }
@@ -122,22 +125,22 @@ public class GeodeTable extends AbstractQueryableTable implements TranslatableTa
   }
 
   /** Validates an alias (output name) used in the OQL select list. */
-  static String checkOqlIdentifier(@Nullable String alias) {
+  static String checkOqlIdentifier(String alias) {
     return checkOql(OQL_IDENTIFIER, "alias", alias);
   }
 
   /** Validates a field path used in the OQL select or GROUP BY list. */
-  static String checkOqlFieldPath(@Nullable String field) {
+  static String checkOqlFieldPath(String field) {
     return checkOql(OQL_FIELD_PATH, "field", field);
   }
 
   /** Validates an aggregate call used in the OQL select list. */
-  static String checkOqlAggregateCall(@Nullable String aggregateCall) {
+  static String checkOqlAggregateCall(String aggregateCall) {
     return checkOql(OQL_AGGREGATE_CALL, "aggregate call", aggregateCall);
   }
 
   /** Validates an ORDER BY entry ({@code field ASC|DESC}). */
-  static String checkOqlOrderByEntry(@Nullable String entry) {
+  static String checkOqlOrderByEntry(String entry) {
     return checkOql(OQL_ORDER_BY_ENTRY, "ORDER BY field", entry);
   }
 
