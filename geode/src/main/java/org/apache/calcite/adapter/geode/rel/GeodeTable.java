@@ -70,10 +70,12 @@ public class GeodeTable extends AbstractQueryableTable implements TranslatableTa
       Pattern.compile("[A-Za-z_$][A-Za-z0-9_$]*");
 
   /** A field path as produced by {@link GeodeRules.RexToGeodeTranslator},
-   * for example {@code primaryAddress.postalCode} or {@code loc[0]}. */
+   * for example {@code primaryAddress.postalCode} or {@code loc[0]}.
+   * Possessive quantifiers avoid backtracking on inputs that almost, but
+   * do not quite, match. */
   private static final Pattern OQL_FIELD_PATH =
-      Pattern.compile("[A-Za-z_$][A-Za-z0-9_$]*"
-          + "(?:\\.[A-Za-z_$][A-Za-z0-9_$]*|\\[[0-9]+\\])*");
+      Pattern.compile("[A-Za-z_$][A-Za-z0-9_$]*+"
+          + "(?:\\.[A-Za-z_$][A-Za-z0-9_$]*+|\\[[0-9]++\\])*+");
 
   /** An aggregate call as produced by {@link GeodeAggregate},
    * for example {@code SUM(pop)}. */

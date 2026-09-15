@@ -325,7 +325,8 @@ public class GeodeUtils {
    * Anything else could shift the boundaries of the emitted statement.
    */
   private static final Pattern SAFE_OQL_IDENTIFIER =
-      Pattern.compile("[A-Za-z_$][A-Za-z0-9_$]*(?:\\.[A-Za-z_$][A-Za-z0-9_$]*|\\[[0-9]+\\])*");
+      Pattern.compile(
+          "[A-Za-z_$][A-Za-z0-9_$]*+(?:\\.[A-Za-z_$][A-Za-z0-9_$]*+|\\[[0-9]++\\])*+");
 
   /**
    * Returns whether {@code name} may be emitted verbatim as an OQL identifier

@@ -149,15 +149,16 @@ class ElasticsearchRules {
 
   /** Shape of field paths that may be embedded in a scripted-field
    * script using the historical dot notation, for example {@code city},
-   * {@code b.a} or {@code loc[0]}. */
+   * {@code b.a} or {@code loc[0]}. Possessive quantifiers avoid
+   * backtracking on inputs that almost, but do not quite, match. */
   private static final Pattern SIMPLE_SCRIPT_PATH =
-      Pattern.compile("[A-Za-z_][A-Za-z0-9_]*"
-          + "(?:\\.[A-Za-z_][A-Za-z0-9_]*)*(?:\\[[0-9]+\\])*");
+      Pattern.compile("[A-Za-z_][A-Za-z0-9_]*+"
+          + "(?:\\.[A-Za-z_][A-Za-z0-9_]*+)*+(?:\\[[0-9]++\\])*+");
 
   /** Trailing array subscripts of a field path, for example {@code [0]}
-   * in {@code loc[0]}. */
+   * in {@code loc[0]}. Possessive quantifiers as above. */
   private static final Pattern TRAILING_SUBSCRIPTS =
-      Pattern.compile("(?:\\[[0-9]+\\])+$");
+      Pattern.compile("(?:\\[[0-9]++\\])++$");
 
   /** Builds the script snippet that reads {@code path} from the document
    * source, for example {@code params._source.city}.
